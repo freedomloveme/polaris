@@ -20,20 +20,26 @@ package namespace
 import (
 	"context"
 
-	"github.com/polarismesh/polaris-server/auth"
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/store"
+	"golang.org/x/sync/singleflight"
+
+	"github.com/polarismesh/polaris/auth"
+	"github.com/polarismesh/polaris/cache"
+	cachetypes "github.com/polarismesh/polaris/cache/api"
+	"github.com/polarismesh/polaris/plugin"
+	"github.com/polarismesh/polaris/store"
 )
 
-func TestInitialize(ctx context.Context, nsOpt *Config, storage store.Store, cacheMgn *cache.CacheManager,
-	authSvr auth.AuthServer) (NamespaceOperateServer, error) {
-
-	namespaceServer := new(Server)
-
+func TestInitialize(_ context.Context, nsOpt *Config, storage store.Store, cacheMgn *cache.CacheManager,
+	userMgn auth.UserServer, strategyMgn auth.StrategyServer) (NamespaceOperateServer, error) {
+	_ = cacheMgn.OpenResourceCache(cachetypes.ConfigEntry{
+		Name: cachetypes.NamespaceName,
+	})
+	nsOpt.AutoCreate = true
+	namespaceServer := &Server{}
 	namespaceServer.caches = cacheMgn
 	namespaceServer.storage = storage
 	namespaceServer.cfg = *nsOpt
+	namespaceServer.createNamespaceSingle = &singleflight.Group{}
 
 	// 获取History插件，注意：插件的配置在bootstrap已经设置好
 	namespaceServer.history = plugin.GetHistory()
@@ -41,5 +47,5 @@ func TestInitialize(ctx context.Context, nsOpt *Config, storage store.Store, cac
 		log.Warn("Not Found History Log Plugin")
 	}
 
-	return newServerAuthAbility(namespaceServer, authSvr), nil
+	return newServerAuthAbility(namespaceServer, userMgn, strategyMgn), nil
 }

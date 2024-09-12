@@ -22,17 +22,20 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/polarismesh/polaris-server/auth"
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/store"
+	"golang.org/x/sync/singleflight"
+
+	"github.com/polarismesh/polaris/auth"
+	"github.com/polarismesh/polaris/cache"
+	cachetypes "github.com/polarismesh/polaris/cache/api"
+	"github.com/polarismesh/polaris/plugin"
+	"github.com/polarismesh/polaris/store"
 )
 
 var (
 	server          NamespaceOperateServer
-	namespaceServer *Server = new(Server)
-	once                    = sync.Once{}
-	finishInit              = false
+	namespaceServer = &Server{}
+	once            sync.Once
+	finishInit      bool
 )
 
 type Config struct {
@@ -54,11 +57,16 @@ func Initialize(ctx context.Context, nsOpt *Config, storage store.Store, cacheMg
 	return nil
 }
 
-func initialize(ctx context.Context, nsOpt *Config, storage store.Store, cacheMgn *cache.CacheManager) error {
-
+func initialize(_ context.Context, nsOpt *Config, storage store.Store, cacheMgn *cache.CacheManager) error {
+	if err := cacheMgn.OpenResourceCache(cachetypes.ConfigEntry{
+		Name: cachetypes.NamespaceName,
+	}); err != nil {
+		return err
+	}
 	namespaceServer.caches = cacheMgn
 	namespaceServer.storage = storage
 	namespaceServer.cfg = *nsOpt
+	namespaceServer.createNamespaceSingle = &singleflight.Group{}
 
 	// 获取History插件，注意：插件的配置在bootstrap已经设置好
 	namespaceServer.history = plugin.GetHistory()
@@ -66,12 +74,17 @@ func initialize(ctx context.Context, nsOpt *Config, storage store.Store, cacheMg
 		log.Warn("Not Found History Log Plugin")
 	}
 
-	authServer, err := auth.GetAuthServer()
+	userMgn, err := auth.GetUserServer()
 	if err != nil {
 		return err
 	}
 
-	server = newServerAuthAbility(namespaceServer, authServer)
+	strategyMgn, err := auth.GetStrategyServer()
+	if err != nil {
+		return err
+	}
+
+	server = newServerAuthAbility(namespaceServer, userMgn, strategyMgn)
 	return nil
 }
 

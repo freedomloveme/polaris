@@ -20,81 +20,79 @@ package store
 import (
 	"time"
 
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 // Store 通用存储接口
 type Store interface {
 	// Name 存储层的名字
 	Name() string
-
 	// Initialize 存储的初始化函数
 	Initialize(c *Config) error
-
 	// Destroy 存储的析构函数
 	Destroy() error
-
 	// CreateTransaction 创建事务对象
 	CreateTransaction() (Transaction, error)
-
 	// StartTx 开启一个原子事务
 	StartTx() (Tx, error)
-
+	// StartReadTx 开启一个原子事务
+	StartReadTx() (Tx, error)
 	// NamespaceStore Service namespace interface
 	NamespaceStore
-
-	//NamingModuleStore Service Registration Discovery Module Storage Interface
+	// NamingModuleStore Service Registration Discovery Module Storage Interface
 	NamingModuleStore
-
-	//ConfigFileModuleStore Configure the central module storage interface
+	// ConfigFileModuleStore Configure the central module storage interface
 	ConfigFileModuleStore
-
-	//ClientStore Client the central module storage interface
+	// ClientStore Client the central module storage interface
 	ClientStore
+	// AdminStore Maintain inteface
+	AdminStore
+	// GrayStore mgr gray resource
+	GrayStore
+	// AuthStore Auth storage interface
+	AuthStore
 }
 
 // NamespaceStore Namespace storage interface
 type NamespaceStore interface {
 	// AddNamespace Save a namespace
 	AddNamespace(namespace *model.Namespace) error
-
 	// UpdateNamespace Update namespace
 	UpdateNamespace(namespace *model.Namespace) error
-
 	// UpdateNamespaceToken Update namespace token
 	UpdateNamespaceToken(name string, token string) error
-
-	// ListNamespaces Query all namespaces under Owner
-	ListNamespaces(owner string) ([]*model.Namespace, error)
-
 	// GetNamespace Get the details of the namespace according to Name
 	GetNamespace(name string) (*model.Namespace, error)
-
 	// GetNamespaces Query Namespace from the database
 	GetNamespaces(filter map[string][]string, offset, limit int) ([]*model.Namespace, uint32, error)
-
 	// GetMoreNamespaces Get incremental data
 	// 此方法用于 cache 增量更新，需要注意 mtime 应为数据库时间戳
 	GetMoreNamespaces(mtime time.Time) ([]*model.Namespace, error)
 }
 
-// Transaction Transaction interface, does not support multi-level concurrency operation, currently only support a single price serial operation
+// GrayStore Gray storage interface
+type GrayStore interface {
+	// CleanGrayResource .
+	CleanGrayResource(tx Tx, data *model.GrayResource) error
+	// CreateGrayResourceTx .
+	CreateGrayResourceTx(tx Tx, data *model.GrayResource) error
+	// GetMoreGrayResouces .
+	GetMoreGrayResouces(firstUpdate bool, mtime time.Time) ([]*model.GrayResource, error)
+}
+
+// Transaction Transaction interface, does not support multi-level concurrency operation,
+// currently only support a single price serial operation
 type Transaction interface {
 	// Commit Transaction
 	Commit() error
-
 	// LockBootstrap Start the lock, limit the concurrent number of Server boot
 	LockBootstrap(key string, server string) error
-
 	// LockNamespace Row it locks Namespace
 	LockNamespace(name string) (*model.Namespace, error)
-
 	// DeleteNamespace Delete Namespace
 	DeleteNamespace(name string) error
-
 	// LockService Row it locks service
 	LockService(name string, namespace string) (*model.Service, error)
-
 	// RLockService Shared lock service
 	RLockService(name string, namespace string) (*model.Service, error)
 }
@@ -103,14 +101,16 @@ type Transaction interface {
 type Tx interface {
 	// Commit Transaction
 	Commit() error
-	// Rollback Rollback transaction
+	// Rollback transaction
 	Rollback() error
 	// GetDelegateTx Get the original proxy transaction object.Different storage types have no business implementation
 	GetDelegateTx() interface{}
+	// CreateReadView create a snapshot read view
+	CreateReadView() error
 }
 
 // ToolStore Storage related functions and tool interfaces
 type ToolStore interface {
 	// GetUnixSecond Get the current time
-	GetUnixSecond() (int64, error)
+	GetUnixSecond(maxWait time.Duration) (int64, error)
 }

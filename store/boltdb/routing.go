@@ -18,13 +18,18 @@
 package boltdb
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/store"
+	bolt "go.etcd.io/bbolt"
+
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/store"
 )
+
+var _ store.RoutingConfigStore = (*routingStore)(nil)
 
 type routingStore struct {
 	handler BoltHandler
@@ -67,7 +72,7 @@ func (r *routingStore) CreateRoutingConfig(conf *model.RoutingConfig) error {
 
 // cleanRoutingConfig 从数据库彻底清理路由配置
 func (r *routingStore) cleanRoutingConfig(serviceID string) error {
-	err := r.handler.DeleteValues(tblNameRouting, []string{serviceID}, false)
+	err := r.handler.DeleteValues(tblNameRouting, []string{serviceID})
 	if err != nil {
 		log.Errorf("[Store][boltdb] delete invalid route config error, %v", err)
 		return err
@@ -114,6 +119,30 @@ func (r *routingStore) DeleteRoutingConfig(serviceID string) error {
 	properties[routingFieldModifyTime] = time.Now()
 
 	err := r.handler.UpdateValue(tblNameRouting, serviceID, properties)
+	if err != nil {
+		log.Errorf("[Store][boltdb] delete route config to kv error, %v", err)
+		return err
+	}
+
+	return nil
+}
+
+func (r *routingStore) DeleteRoutingConfigTx(tx store.Tx, serviceID string) error {
+	if tx == nil {
+		return errors.New("tx is nil")
+	}
+
+	if serviceID == "" {
+		log.Errorf("[Store][boltdb] delete routing config missing service id")
+		return store.NewStatusError(store.EmptyParamsErr, "missing service id")
+	}
+
+	properties := make(map[string]interface{})
+	properties[routingFieldValid] = false
+	properties[routingFieldModifyTime] = time.Now()
+
+	boltTx := tx.GetDelegateTx().(*bolt.Tx)
+	err := updateValue(boltTx, tblNameRouting, serviceID, properties)
 	if err != nil {
 		log.Errorf("[Store][boltdb] delete route config to kv error, %v", err)
 		return err
@@ -263,7 +292,7 @@ func (r *routingStore) GetRoutingConfigs(
 
 	fields = []string{SvcFieldID, SvcFieldName, SvcFieldNamespace, SvcFieldValid}
 
-	services, err := r.handler.LoadValuesByFilter(tblNameService, fields, &model.Service{},
+	services, err := r.handler.LoadValuesByFilter(tblNameService, fields, &Service{},
 		func(m map[string]interface{}) bool {
 
 			if valid, _ := m[SvcFieldValid].(bool); !valid {
@@ -290,11 +319,11 @@ func (r *routingStore) GetRoutingConfigs(
 			return ok
 		})
 
-	var out []*model.ExtendRoutingConfig
+	out := make([]*model.ExtendRoutingConfig, 0, 4)
 
 	for id, r := range routeConf {
 		var temp model.ExtendRoutingConfig
-		svc, ok := services[id].(*model.Service)
+		svc, ok := services[id].(*Service)
 		if ok {
 			temp.ServiceName = svc.Name
 			temp.NamespaceName = svc.Namespace
@@ -344,9 +373,8 @@ func getRealRouteConfList(routeConf []*model.ExtendRoutingConfig, offset, limit 
 			return true
 		} else if routeConf[i].Config.ModifyTime.Before(routeConf[j].Config.ModifyTime) {
 			return false
-		} else {
-			return strings.Compare(routeConf[i].Config.ID, routeConf[j].Config.ID) < 0
 		}
+		return strings.Compare(routeConf[i].Config.ID, routeConf[j].Config.ID) < 0
 	})
 
 	return routeConf[beginIndex:endIndex]

@@ -125,9 +125,14 @@ type Options struct {
 	// stack will hold on to the logger even though it gets closed. This causes data races.
 	LogGrpc bool
 
-	OutputLevel     string `yaml:"outputLevel"`
-	StackTraceLevel string `yaml:"stackTraceLevel"`
-	LogCaller       bool   `yaml:"logCaller"`
+	// RotationMaxDurationForHour
+	RotationMaxDurationForHour int `yaml:"rotationMaxDurationForHour"`
+
+	Compress         bool   `yaml:"compress"`
+	OutputLevel      string `yaml:"outputLevel"`
+	StackTraceLevel  string `yaml:"stackTraceLevel"`
+	DisableLogCaller bool   `yaml:"disableLogCaller"`
+	OnlyContent      bool   `yaml:"onlyContent"`
 }
 
 // DefaultOptions returns a new set of options, initialized to the defaults

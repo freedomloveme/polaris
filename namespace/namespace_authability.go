@@ -20,22 +20,31 @@ package namespace
 import (
 	"context"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/common/utils"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+
+	cachetypes "github.com/polarismesh/polaris/cache/api"
+	api "github.com/polarismesh/polaris/common/api/v1"
+	"github.com/polarismesh/polaris/common/model"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/common/utils"
 )
 
-// AllowAutoCreate 是否允许自动创建命名空间
-func (svr *serverAuthAbility) AllowAutoCreate() bool {
-	return svr.targetServer.AllowAutoCreate()
+var _ NamespaceOperateServer = (*serverAuthAbility)(nil)
+
+// CreateNamespaceIfAbsent Create a single name space
+func (svr *serverAuthAbility) CreateNamespaceIfAbsent(ctx context.Context,
+	req *apimodel.Namespace) (string, *apiservice.Response) {
+	return svr.targetServer.CreateNamespaceIfAbsent(ctx, req)
 }
 
-// CreateNamespaces 创建命名空间，只需要要后置鉴权，将数据添加到资源策略中
-func (svr *serverAuthAbility) CreateNamespace(ctx context.Context, req *api.Namespace) *api.Response {
-	authCtx := svr.collectNamespaceAuthContext(ctx, []*api.Namespace{req}, model.Create, "CreateNamespace")
-
+// CreateNamespace 创建命名空间，只需要要后置鉴权，将数据添加到资源策略中
+func (svr *serverAuthAbility) CreateNamespace(ctx context.Context, req *apimodel.Namespace) *apiservice.Response {
+	authCtx := svr.collectNamespaceAuthContext(
+		ctx, []*apimodel.Namespace{req}, authcommon.Create, authcommon.CreateNamespace)
 	// 验证 token 信息
-	if _, err := svr.authMgn.CheckConsolePermission(authCtx); err != nil {
+	if _, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
 		return api.NewResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
@@ -43,8 +52,7 @@ func (svr *serverAuthAbility) CreateNamespace(ctx context.Context, req *api.Name
 	ctx = context.WithValue(ctx, utils.ContextAuthContextKey, authCtx)
 
 	// 填充 ownerId 信息数据
-	ownerId := utils.ParseOwnerID(ctx)
-	if len(ownerId) > 0 {
+	if ownerId := utils.ParseOwnerID(ctx); len(ownerId) > 0 {
 		req.Owners = utils.NewStringValue(ownerId)
 	}
 
@@ -52,11 +60,12 @@ func (svr *serverAuthAbility) CreateNamespace(ctx context.Context, req *api.Name
 }
 
 // CreateNamespaces 创建命名空间，只需要要后置鉴权，将数据添加到资源策略中
-func (svr *serverAuthAbility) CreateNamespaces(ctx context.Context, reqs []*api.Namespace) *api.BatchWriteResponse {
-	authCtx := svr.collectNamespaceAuthContext(ctx, reqs, model.Create, "CreateNamespaces")
+func (svr *serverAuthAbility) CreateNamespaces(
+	ctx context.Context, reqs []*apimodel.Namespace) *apiservice.BatchWriteResponse {
+	authCtx := svr.collectNamespaceAuthContext(ctx, reqs, authcommon.Create, authcommon.CreateNamespaces)
 
 	// 验证 token 信息
-	if _, err := svr.authMgn.CheckConsolePermission(authCtx); err != nil {
+	if _, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
 		return api.NewBatchWriteResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
@@ -76,11 +85,10 @@ func (svr *serverAuthAbility) CreateNamespaces(ctx context.Context, reqs []*api.
 }
 
 // DeleteNamespace 删除命名空间，需要先走权限检查
-func (svr *serverAuthAbility) DeleteNamespace(ctx context.Context, req *api.Namespace) *api.Response {
-	authCtx := svr.collectNamespaceAuthContext(ctx, []*api.Namespace{req}, model.Delete, "DeleteNamespace")
-
-	_, err := svr.authMgn.CheckConsolePermission(authCtx)
-	if err != nil {
+func (svr *serverAuthAbility) DeleteNamespace(ctx context.Context, req *apimodel.Namespace) *apiservice.Response {
+	authCtx := svr.collectNamespaceAuthContext(
+		ctx, []*apimodel.Namespace{req}, authcommon.Delete, authcommon.DeleteNamespace)
+	if _, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
 		return api.NewResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
@@ -91,11 +99,10 @@ func (svr *serverAuthAbility) DeleteNamespace(ctx context.Context, req *api.Name
 }
 
 // DeleteNamespaces 删除命名空间，需要先走权限检查
-func (svr *serverAuthAbility) DeleteNamespaces(ctx context.Context, reqs []*api.Namespace) *api.BatchWriteResponse {
-	authCtx := svr.collectNamespaceAuthContext(ctx, reqs, model.Delete, "DeleteNamespaces")
-
-	_, err := svr.authMgn.CheckConsolePermission(authCtx)
-	if err != nil {
+func (svr *serverAuthAbility) DeleteNamespaces(
+	ctx context.Context, reqs []*apimodel.Namespace) *apiservice.BatchWriteResponse {
+	authCtx := svr.collectNamespaceAuthContext(ctx, reqs, authcommon.Delete, authcommon.DeleteNamespaces)
+	if _, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
 		return api.NewBatchWriteResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
@@ -106,11 +113,10 @@ func (svr *serverAuthAbility) DeleteNamespaces(ctx context.Context, reqs []*api.
 }
 
 // UpdateNamespaces 更新命名空间，需要先走权限检查
-func (svr *serverAuthAbility) UpdateNamespaces(ctx context.Context, req []*api.Namespace) *api.BatchWriteResponse {
-	authCtx := svr.collectNamespaceAuthContext(ctx, req, model.Modify, "UpdateNamespaces")
-
-	_, err := svr.authMgn.CheckConsolePermission(authCtx)
-	if err != nil {
+func (svr *serverAuthAbility) UpdateNamespaces(
+	ctx context.Context, req []*apimodel.Namespace) *apiservice.BatchWriteResponse {
+	authCtx := svr.collectNamespaceAuthContext(ctx, req, authcommon.Modify, authcommon.UpdateNamespaces)
+	if _, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
 		return api.NewBatchWriteResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
@@ -121,11 +127,10 @@ func (svr *serverAuthAbility) UpdateNamespaces(ctx context.Context, req []*api.N
 }
 
 // UpdateNamespaceToken 更新命名空间的token信息，需要先走权限检查
-func (svr *serverAuthAbility) UpdateNamespaceToken(ctx context.Context, req *api.Namespace) *api.Response {
-	authCtx := svr.collectNamespaceAuthContext(ctx, []*api.Namespace{req}, model.Modify, "UpdateNamespaceToken")
-
-	_, err := svr.authMgn.CheckConsolePermission(authCtx)
-	if err != nil {
+func (svr *serverAuthAbility) UpdateNamespaceToken(ctx context.Context, req *apimodel.Namespace) *apiservice.Response {
+	authCtx := svr.collectNamespaceAuthContext(
+		ctx, []*apimodel.Namespace{req}, authcommon.Modify, authcommon.UpdateNamespaceToken)
+	if _, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
 		return api.NewResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
@@ -136,11 +141,10 @@ func (svr *serverAuthAbility) UpdateNamespaceToken(ctx context.Context, req *api
 }
 
 // GetNamespaces 获取命名空间列表信息，暂时不走权限检查
-func (svr *serverAuthAbility) GetNamespaces(ctx context.Context, query map[string][]string) *api.BatchQueryResponse {
-
-	authCtx := svr.collectNamespaceAuthContext(ctx, nil, model.Read, "GetNamespaces")
-
-	_, err := svr.authMgn.CheckConsolePermission(authCtx)
+func (svr *serverAuthAbility) GetNamespaces(
+	ctx context.Context, query map[string][]string) *apiservice.BatchQueryResponse {
+	authCtx := svr.collectNamespaceAuthContext(ctx, nil, authcommon.Read, authcommon.DescribeNamespaces)
+	_, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx)
 	if err != nil {
 		return api.NewBatchQueryResponseWithMsg(convertToErrCode(err), err.Error())
 	}
@@ -148,40 +152,26 @@ func (svr *serverAuthAbility) GetNamespaces(ctx context.Context, query map[strin
 	ctx = authCtx.GetRequestContext()
 	ctx = context.WithValue(ctx, utils.ContextAuthContextKey, authCtx)
 
-	resp := svr.targetServer.GetNamespaces(ctx, query)
-	if len(resp.Namespaces) != 0 {
+	cachetypes.AppendNamespacePredicate(ctx, func(ctx context.Context, n *model.Namespace) bool {
+		return svr.policySvr.GetAuthChecker().ResourcePredicate(authCtx, &authcommon.ResourceEntry{
+			Type: apisecurity.ResourceType_Users,
+			ID:   n.Name,
+		})
+	})
 
-		principal := model.Principal{
-			PrincipalID:   utils.ParseUserID(ctx),
-			PrincipalRole: model.PrincipalUser,
-		}
-		for index := range resp.Namespaces {
-			ns := resp.Namespaces[index]
-			editable := true
-			// 如果鉴权能力没有开启，那就默认都可以进行编辑
-			if svr.authMgn.IsOpenConsoleAuth() {
-				editable = svr.targetServer.caches.AuthStrategy().IsResourceEditable(principal,
-					api.ResourceType_Namespaces, ns.Id.GetValue())
-			}
-			ns.Editable = utils.NewBoolValue(editable)
-		}
-	}
-
-	return resp
+	return svr.targetServer.GetNamespaces(ctx, query)
 }
 
 // GetNamespaceToken 获取命名空间的token信息，暂时不走权限检查
-func (svr *serverAuthAbility) GetNamespaceToken(ctx context.Context, req *api.Namespace) *api.Response {
-
-	authCtx := svr.collectNamespaceAuthContext(ctx, []*api.Namespace{req}, model.Read, "GetNamespaceToken")
-
-	_, err := svr.authMgn.CheckConsolePermission(authCtx)
+func (svr *serverAuthAbility) GetNamespaceToken(ctx context.Context, req *apimodel.Namespace) *apiservice.Response {
+	authCtx := svr.collectNamespaceAuthContext(
+		ctx, []*apimodel.Namespace{req}, authcommon.Read, authcommon.DescribeNamespaceToken)
+	_, err := svr.policySvr.GetAuthChecker().CheckConsolePermission(authCtx)
 	if err != nil {
 		return api.NewResponseWithMsg(convertToErrCode(err), err.Error())
 	}
 
 	ctx = authCtx.GetRequestContext()
 	ctx = context.WithValue(ctx, utils.ContextAuthContextKey, authCtx)
-
 	return svr.targetServer.GetNamespaceToken(ctx, req)
 }

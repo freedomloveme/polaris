@@ -19,30 +19,24 @@ package auth
 
 import (
 	"context"
-	"errors"
-	"log"
 
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/store"
+	cachetypes "github.com/polarismesh/polaris/cache/api"
+	"github.com/polarismesh/polaris/store"
 )
 
 // TestInitialize 包裹了初始化函数，在 Initialize 的时候会在自动调用，全局初始化一次
-func TestInitialize(_ context.Context, authOpt *Config, storage store.Store, cacheMgn *cache.CacheManager) (AuthServer, error) {
-	name := authOpt.Name
-	if name == "" {
-		return nil, errors.New("auth manager Name is empty")
+func TestInitialize(ctx context.Context, authOpt *Config, storage store.Store,
+	cacheMgn cachetypes.CacheManager) (UserServer, StrategyServer, error) {
+	userSvr, strategySvr, err := initialize(ctx, authOpt, storage, cacheMgn)
+	if err != nil {
+		return nil, nil, err
 	}
+	userMgn = userSvr
+	strategyMgn = strategySvr
+	return userSvr, strategySvr, nil
+}
 
-	mgn, ok := Slots[name]
-	if !ok {
-		return nil, errors.New("no such name AuthManager")
-	}
-
-	authSvr = mgn
-
-	if err := authSvr.Initialize(authOpt, storage, cacheMgn); err != nil {
-		log.Printf("auth manager do initialize err: %s", err.Error())
-		return nil, err
-	}
-	return authSvr, nil
+func TestClean() {
+	userMgn = nil
+	strategyMgn = nil
 }

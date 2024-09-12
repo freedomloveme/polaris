@@ -19,19 +19,18 @@ package eurekaserver
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/google/uuid"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/polarismesh/polaris-server/service"
-
-	"github.com/golang/protobuf/ptypes/wrappers"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-
-	"bou.ke/monkey"
-	"github.com/google/uuid"
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/service"
 )
 
 const (
@@ -73,7 +72,7 @@ func buildServices(count int, namespace string, services map[svcName]*model.Serv
 
 func buildMockInstance(idx int, svc *model.Service, healthy bool, vipAddresses string, svipAddresses string) *model.Instance {
 	instance := &model.Instance{
-		Proto: &api.Instance{
+		Proto: &apiservice.Instance{
 			Id:                &wrappers.StringValue{Value: uuid.NewString()},
 			Service:           &wrappers.StringValue{Value: svc.Name},
 			Namespace:         &wrappers.StringValue{Value: svc.Namespace},
@@ -83,12 +82,12 @@ func buildMockInstance(idx int, svc *model.Service, healthy bool, vipAddresses s
 			Version:           &wrappers.StringValue{Value: "1.0.0"},
 			Weight:            &wrappers.UInt32Value{Value: 100},
 			EnableHealthCheck: &wrappers.BoolValue{Value: true},
-			HealthCheck: &api.HealthCheck{Type: api.HealthCheck_HEARTBEAT, Heartbeat: &api.HeartbeatHealthCheck{
+			HealthCheck: &apiservice.HealthCheck{Type: apiservice.HealthCheck_HEARTBEAT, Heartbeat: &apiservice.HeartbeatHealthCheck{
 				Ttl: nil,
 			}},
 			Healthy: &wrappers.BoolValue{Value: healthy},
 			Isolate: &wrappers.BoolValue{Value: false},
-			Location: &api.Location{
+			Location: &apimodel.Location{
 				Region: &wrappers.StringValue{Value: "South China"},
 				Zone:   &wrappers.StringValue{Value: "ShangHai"},
 				Campus: &wrappers.StringValue{Value: "CampusOne"},
@@ -173,8 +172,8 @@ func mockGetCacheInstances(namingServer service.DiscoverServer, svcId string) ([
 
 func doFunctionMock() {
 	buildMockSvcInstances()
-	monkey.Patch(getCacheServices, mockGetCacheServices)
-	monkey.Patch(getCacheInstances, mockGetCacheInstances)
+	getCacheServicesFunc = mockGetCacheServices
+	getCacheInstancesFunc = mockGetCacheInstances
 }
 
 // TestApplicationsBuilder_BuildApplications testing method for application builder
@@ -189,7 +188,7 @@ func TestApplicationsBuilder_BuildApplications(t *testing.T) {
 	assert.Equal(t, defaultSvcCount, len(applications))
 	for _, application := range applications {
 		serviceName := svcName{
-			name:      application.Name,
+			name:      strings.ToLower(application.Name),
 			namespace: DefaultNamespace,
 		}
 		svc, ok := mockServices[serviceName]
@@ -210,8 +209,8 @@ func TestApplicationsBuilder_BuildApplications(t *testing.T) {
 
 func doUnhealthyFunctionMock() {
 	buildMockUnhealthyInstances()
-	monkey.Patch(getCacheServices, mockGetUnhealthyServices)
-	monkey.Patch(getCacheInstances, mockGetUnhealthyInstances)
+	getCacheServicesFunc = mockGetUnhealthyServices
+	getCacheInstancesFunc = mockGetUnhealthyInstances
 }
 
 func mockGetUnhealthyServices(namingServer service.DiscoverServer, namespace string) map[string]*model.Service {
@@ -236,25 +235,33 @@ func mockGetUnhealthyInstances(namingServer service.DiscoverServer, svcId string
 	return retValue, uuid.NewString(), nil
 }
 
-// TestApplicationsBuilder_BuildApplicationsSelfPreservation test selfPreservation ability
-func TestApplicationsBuilder_BuildApplicationsSelfPreservation(t *testing.T) {
-	doUnhealthyFunctionMock()
-	builder := &ApplicationsBuilder{
-		namespace:              DefaultNamespace,
-		enableSelfPreservation: true,
-	}
-	appResCache := builder.BuildApplications(nil)
-	applications := appResCache.AppsResp.Applications.Application
-	assert.Equal(t, unhealthySvcCount, len(applications))
-	for _, application := range applications {
-		serviceName := svcName{
-			name:      application.Name,
-			namespace: DefaultNamespace,
-		}
-		svc, ok := mockUnhealthyServices[serviceName]
-		assert.True(t, ok)
-		instances := application.Instance
-		mInstances := mockUnhealthyInstances[svc.ID]
-		assert.Equal(t, len(mInstances), len(instances))
-	}
+// TestBuildDataCenterInfo test to build dci info
+func TestBuildDataCenterInfo(t *testing.T) {
+	CustomEurekaParameters[CustomKeyDciClass] = "com.netflix.appinfo.AmazonInfo"
+	CustomEurekaParameters[CustomKeyDciName] = "testOwn"
+	dciInfo := buildDataCenterInfo()
+	assert.Equal(t, CustomEurekaParameters[CustomKeyDciClass], dciInfo.Clazz)
+	assert.Equal(t, CustomEurekaParameters[CustomKeyDciName], dciInfo.Name)
+	delete(CustomEurekaParameters, CustomKeyDciName)
+	dciInfo = buildDataCenterInfo()
+	assert.Equal(t, CustomEurekaParameters[CustomKeyDciClass], dciInfo.Clazz)
+	assert.Equal(t, DefaultDciName, dciInfo.Name)
+	delete(CustomEurekaParameters, CustomKeyDciClass)
+	CustomEurekaParameters[CustomKeyDciName] = "testOwn"
+	dciInfo = buildDataCenterInfo()
+	assert.Equal(t, DefaultDciClazz, dciInfo.Clazz)
+	assert.Equal(t, CustomEurekaParameters[CustomKeyDciName], dciInfo.Name)
+	delete(CustomEurekaParameters, CustomKeyDciName)
+	dciInfo = buildDataCenterInfo()
+	assert.Equal(t, DefaultDciClazz, dciInfo.Clazz)
+	assert.Equal(t, DefaultDciName, dciInfo.Name)
+}
+
+// TestBuildInstance test to build the instance
+func TestBuildInstance(t *testing.T) {
+	CustomEurekaParameters[CustomKeyDciClass] = "com.netflix.appinfo.AmazonInfo"
+	svc := &model.Service{ID: "111", Name: "testInst0", Namespace: "test"}
+	instance := buildMockInstance(0, svc, true, "xxx.com", "yyyy.com")
+	instanceInfo := buildInstance(svc.Name, instance.Proto, 123345550)
+	assert.Equal(t, CustomEurekaParameters[CustomKeyDciClass], instanceInfo.DataCenterInfo.Clazz)
 }

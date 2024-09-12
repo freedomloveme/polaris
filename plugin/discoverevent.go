@@ -21,37 +21,104 @@ import (
 	"os"
 	"sync"
 
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 var (
-	discoverEventOnce = &sync.Once{}
+	discoverEventOnce sync.Once
+	_discoverChannel  DiscoverChannel
 )
 
 // DiscoverChannel is used to receive discover events from the agent
 type DiscoverChannel interface {
 	Plugin
-	// PublishEvent 发布一个服务事件
-	//  @param event 服务事件信息
-	PublishEvent(event model.DiscoverEvent)
+	// PublishEvent Release a service event
+	PublishEvent(event model.InstanceEvent)
 }
 
-// GetDiscoverEvent 获取服务发现事件插件
+// GetDiscoverEvent Get service discovery event plug -in
 func GetDiscoverEvent() DiscoverChannel {
-	c := &config.DiscoverEvent
-
-	plugin, exist := pluginSet[c.Name]
-	if !exist {
-		return nil
+	if _discoverChannel != nil {
+		return _discoverChannel
 	}
 
 	discoverEventOnce.Do(func() {
-		if err := plugin.Initialize(c); err != nil {
-			log.Errorf("plugin init err: %s", err.Error())
+		var (
+			entries []ConfigEntry
+		)
+
+		if len(config.DiscoverEvent.Entries) != 0 {
+			entries = append(entries, config.DiscoverEvent.Entries...)
+		} else {
+			entries = append(entries, ConfigEntry{
+				Name:   config.DiscoverEvent.Name,
+				Option: config.DiscoverEvent.Option,
+			})
+		}
+
+		_discoverChannel = newCompositeDiscoverChannel(entries)
+		if err := _discoverChannel.Initialize(nil); err != nil {
+			log.Errorf("DiscoverChannel plugin init err: %s", err.Error())
 			os.Exit(-1)
 		}
 	})
 
-	return plugin.(DiscoverChannel)
+	return _discoverChannel
+}
+
+// newCompositeDiscoverChannel creates Composite DiscoverChannel
+func newCompositeDiscoverChannel(options []ConfigEntry) *compositeDiscoverChannel {
+	return &compositeDiscoverChannel{
+		chain:   make([]DiscoverChannel, 0, len(options)),
+		options: options,
+	}
+}
+
+// compositeDiscoverChannel is used to receive discover events from the agent
+type compositeDiscoverChannel struct {
+	chain   []DiscoverChannel
+	options []ConfigEntry
+}
+
+func (c *compositeDiscoverChannel) Name() string {
+	return "CompositeDiscoverChannel"
+}
+
+func (c *compositeDiscoverChannel) Initialize(config *ConfigEntry) error {
+	for i := range c.options {
+		entry := c.options[i]
+		item, exist := pluginSet[entry.Name]
+		if !exist {
+			log.Errorf("plugin DiscoverChannel not found target: %s", entry.Name)
+			continue
+		}
+
+		discoverChannel, ok := item.(DiscoverChannel)
+		if !ok {
+			log.Errorf("plugin target: %s not DiscoverChannel", entry.Name)
+			continue
+		}
+
+		if err := discoverChannel.Initialize(&entry); err != nil {
+			return err
+		}
+		c.chain = append(c.chain, discoverChannel)
+	}
+	return nil
+}
+
+func (c *compositeDiscoverChannel) Destroy() error {
+	for i := range c.chain {
+		if err := c.chain[i].Destroy(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PublishEvent Release a service event
+func (c *compositeDiscoverChannel) PublishEvent(event model.InstanceEvent) {
+	for i := range c.chain {
+		c.chain[i].PublishEvent(event)
+	}
 }

@@ -26,11 +26,14 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/ptypes/wrappers"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	bolt "go.etcd.io/bbolt"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
-	commontime "github.com/polarismesh/polaris-server/common/time"
+	"github.com/polarismesh/polaris/common/model"
+	commontime "github.com/polarismesh/polaris/common/time"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/store"
 )
 
 type instanceStore struct {
@@ -49,7 +52,7 @@ const (
 func (i *instanceStore) AddInstance(instance *model.Instance) error {
 	initInstance([]*model.Instance{instance})
 	// Before adding new data, you must clean up the old data
-	if err := i.handler.DeleteValues(tblNameInstance, []string{instance.ID()}, true); err != nil {
+	if err := i.handler.DeleteValues(tblNameInstance, []string{instance.ID()}); err != nil {
 		log.Errorf("[Store][boltdb] delete instance to kv error, %v", err)
 		return err
 	}
@@ -75,7 +78,7 @@ func (i *instanceStore) BatchAddInstances(instances []*model.Instance) error {
 	}
 
 	// clear old instances
-	if err := i.handler.DeleteValues(tblNameInstance, insIds, true); err != nil {
+	if err := i.handler.DeleteValues(tblNameInstance, insIds); err != nil {
 		log.Errorf("[Store][boltdb] save instance to kv error, %v", err)
 		return err
 	}
@@ -146,7 +149,7 @@ func (i *instanceStore) BatchDeleteInstances(ids []interface{}) error {
 
 // CleanInstance Delete an instance
 func (i *instanceStore) CleanInstance(instanceID string) error {
-	if err := i.handler.DeleteValues(tblNameInstance, []string{instanceID}, true); err != nil {
+	if err := i.handler.DeleteValues(tblNameInstance, []string{instanceID}); err != nil {
 		log.Errorf("[Store][boltdb] delete instance from kv error, %v", err)
 		return err
 	}
@@ -210,7 +213,7 @@ func (i *instanceStore) GetInstancesBrief(ids map[string]bool) (map[string]*mode
 			if !ok {
 				return false
 			}
-			id := insProto.(*api.Instance).GetId().GetValue()
+			id := insProto.(*apiservice.Instance).GetId().GetValue()
 			_, ok = ids[id]
 			return ok
 		})
@@ -227,7 +230,7 @@ func (i *instanceStore) GetInstancesBrief(ids map[string]bool) (map[string]*mode
 	}
 
 	fields = []string{SvcFieldID, SvcFieldValid}
-	services, err := i.handler.LoadValuesByFilter(tblNameService, fields, &model.Service{},
+	services, err := i.handler.LoadValuesByFilter(tblNameService, fields, &Service{},
 		func(m map[string]interface{}) bool {
 			valid, ok := m[insFieldValid]
 			if ok && !valid.(bool) {
@@ -256,7 +259,7 @@ func (i *instanceStore) GetInstancesBrief(ids map[string]bool) (map[string]*mode
 			log.Errorf("[Store][boltdb] can not find instance service , instanceId is %s", tempIns.ID())
 			return nil, errors.New("can not find instance service")
 		}
-		tempService := svc.(*model.Service)
+		tempService := svc.(*Service)
 		instance.ID = tempIns.ID()
 		instance.Host = tempIns.Host()
 		instance.Port = tempIns.Port()
@@ -283,7 +286,7 @@ func (i *instanceStore) GetInstance(instanceID string) (*model.Instance, error) 
 			if !ok {
 				return false
 			}
-			id := insProto.(*api.Instance).GetId().GetValue()
+			id := insProto.(*apiservice.Instance).GetId().GetValue()
 			return id == instanceID
 		})
 	if err != nil {
@@ -301,6 +304,18 @@ func (i *instanceStore) GetInstance(instanceID string) (*model.Instance, error) 
 func (i *instanceStore) GetInstancesCount() (uint32, error) {
 
 	count, err := i.handler.CountValues(tblNameInstance)
+	if err != nil {
+		log.Errorf("[Store][boltdb] get instance count error, %v", err)
+		return 0, err
+	}
+
+	return uint32(count), nil
+}
+
+// GetInstancesCountTx Get the total number of instances
+func (i *instanceStore) GetInstancesCountTx(tx store.Tx) (uint32, error) {
+	dbTx, _ := tx.GetDelegateTx().(*bolt.Tx)
+	count, err := countValues(dbTx, tblNameInstance)
 	if err != nil {
 		log.Errorf("[Store][boltdb] get instance count error, %v", err)
 		return 0, err
@@ -332,7 +347,7 @@ func (i *instanceStore) GetInstancesMainByService(serviceID, host string) ([]*mo
 			}
 
 			svcId := sId.(string)
-			h := insProto.(*api.Instance).GetHost().GetValue()
+			h := insProto.(*apiservice.Instance).GetHost().GetValue()
 			if svcId != serviceID {
 				return false
 			}
@@ -352,9 +367,6 @@ func (i *instanceStore) GetInstancesMainByService(serviceID, host string) ([]*mo
 // GetExpandInstances View instance details and corresponding number according to filter conditions
 func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 	offset uint32, limit uint32) (uint32, []*model.Instance, error) {
-
-	log.Infof("get GetExpandInstances request %+v", filter)
-
 	if limit == 0 {
 		return 0, make([]*model.Instance, 0), nil
 	}
@@ -363,18 +375,23 @@ func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 	name, isServiceName := filter["name"]
 	namespace, isNamespace := filter["namespace"]
 
-	if isServiceName && isNamespace {
+	svcIDFilterSet := make(map[string]struct{}, 0)
+	if isNamespace || isServiceName {
 		sStore := serviceStore{handler: i.handler}
-		svc, err := sStore.getServiceByNameAndNs(name, namespace)
+		svcs, err := sStore.GetServiceByNameAndNamespace(name, namespace)
 		if err != nil {
 			log.Errorf("[Store][boltdb] find service error, %v", err)
 			return 0, nil, err
 		}
-		filter["serviceID"] = svc.ID
+		for _, svc := range svcs {
+			svcIDFilterSet[svc.ID] = struct{}{}
+		}
+		if len(svcIDFilterSet) == 0 {
+			return 0, make([]*model.Instance, 0), nil
+		}
 	}
 
 	svcIdsTmp := make(map[string]struct{})
-
 	fields := []string{insFieldProto, insFieldServiceID, insFieldValid}
 
 	instances, err := i.handler.LoadValuesByFilter(tblNameInstance, fields, &model.Instance{},
@@ -388,15 +405,26 @@ func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 			if !ok {
 				return false
 			}
-			ins := insProto.(*api.Instance)
+			ins := insProto.(*apiservice.Instance)
 			host, isHost := filter["host"]
 			port, isPort := filter["port"]
 			protocol, isProtocol := filter["protocol"]
 			version, isVersion := filter["version"]
 			healthy, isHealthy := filter["health_status"]
 			isolate, isIsolate := filter["isolate"]
-			svcID, isSvcID := filter["serviceID"]
+			id, isId := filter["id"]
 
+			if isId {
+				if utils.IsWildName(id) {
+					if !utils.IsWildMatch(ins.GetId().GetValue(), id) {
+						return false
+					}
+				} else {
+					if id != ins.GetId().GetValue() {
+						return false
+					}
+				}
+			}
 			if isHost && host != ins.GetHost().GetValue() {
 				return false
 			}
@@ -415,15 +443,23 @@ func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 			if isIsolate && compareParam2BoolNotEqual(isolate, ins.GetIsolate().GetValue()) {
 				return false
 			}
-			if isSvcID {
+
+			// 如果提供了 serviceName 或者 namespaceName 才过滤 serviceID
+			if isServiceName || isNamespace {
+				// filter serviceID
 				sID, ok := m["ServiceID"]
 				if !ok {
 					return false
 				}
-				if sID != svcID {
+				sIDStr, strOK := sID.(string)
+				if !strOK {
+					return false
+				}
+				if _, ok := svcIDFilterSet[sIDStr]; !ok {
 					return false
 				}
 			}
+
 			// filter metadata
 			if len(metaFilter) > 0 {
 				var key, value string
@@ -452,8 +488,7 @@ func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 		svcIds[pos] = k
 		pos++
 	}
-	svcRets, err := i.handler.LoadValues(tblNameService, svcIds, &model.Service{})
-	svcRets, err = i.handler.LoadValuesAll(tblNameService, &model.Service{})
+	svcRets, err := i.handler.LoadValuesAll(tblNameService, &Service{})
 	if err != nil {
 		log.Errorf("[Store][boltdb] load service from kv error, %v", err)
 		return 0, nil, err
@@ -462,11 +497,12 @@ func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 		ins := v.(*model.Instance)
 		service, ok := svcRets[ins.ServiceID]
 		if !ok {
-			log.Errorf("[Store][boltdb] no found instance relate service, instance-id: %s, service-id: %s", ins.ID(), ins.ServiceID)
+			log.Errorf("[Store][boltdb] no found instance relate service, "+
+				"instance-id: %s, service-id: %s", ins.ID(), ins.ServiceID)
 			return 0, nil, errors.New("no found instance relate service")
 		}
-		ins.Proto.Service = wrapperspb.String(service.(*model.Service).Name)
-		ins.Proto.Namespace = wrapperspb.String(service.(*model.Service).Namespace)
+		ins.Proto.Service = wrapperspb.String(service.(*Service).Name)
+		ins.Proto.Namespace = wrapperspb.String(service.(*Service).Namespace)
 	}
 
 	totalCount := uint32(len(instances))
@@ -475,8 +511,10 @@ func (i *instanceStore) GetExpandInstances(filter, metaFilter map[string]string,
 }
 
 // GetMoreInstances Get incremental instances according to mtime
-func (i *instanceStore) GetMoreInstances(
-	mtime time.Time, firstUpdate, needMeta bool, serviceID []string) (map[string]*model.Instance, error) {
+func (i *instanceStore) GetMoreInstances(tx store.Tx, mtime time.Time, firstUpdate, needMeta bool,
+	serviceID []string) (map[string]*model.Instance, error) {
+
+	dbTx, _ := tx.GetDelegateTx().(*bolt.Tx)
 
 	fields := []string{insFieldProto, insFieldServiceID, insFieldValid}
 	svcIdMap := make(map[string]bool)
@@ -484,7 +522,8 @@ func (i *instanceStore) GetMoreInstances(
 		svcIdMap[s] = true
 	}
 
-	instances, err := i.handler.LoadValuesByFilter(tblNameInstance, fields, &model.Instance{},
+	instances := make(map[string]interface{})
+	err := loadValuesByFilter(dbTx, tblNameInstance, fields, &model.Instance{},
 		func(m map[string]interface{}) bool {
 
 			if firstUpdate {
@@ -502,7 +541,7 @@ func (i *instanceStore) GetMoreInstances(
 			if !ok {
 				return false
 			}
-			ins := insProto.(*api.Instance)
+			ins := insProto.(*apiservice.Instance)
 			serviceId := svcId.(string)
 
 			insMtime, err := time.Parse("2006-01-02 15:04:05", ins.GetMtime().GetValue())
@@ -523,7 +562,7 @@ func (i *instanceStore) GetMoreInstances(
 			}
 
 			return true
-		})
+		}, instances)
 
 	if err != nil {
 		log.Errorf("[Store][boltdb] load instance from kv error, %v", err)
@@ -555,7 +594,7 @@ func (i *instanceStore) SetInstanceHealthStatus(instanceID string, flag int, rev
 			if !ok {
 				return false
 			}
-			insId := insProto.(*api.Instance).GetId().GetValue()
+			insId := insProto.(*apiservice.Instance).GetId().GetValue()
 
 			return insId == instanceID
 		})
@@ -618,7 +657,7 @@ func (i *instanceStore) BatchSetInstanceIsolate(ids []interface{}, isolate int, 
 			if !ok {
 				return false
 			}
-			insId := proto.(*api.Instance).GetId().GetValue()
+			insId := proto.(*apiservice.Instance).GetId().GetValue()
 
 			_, ok = insIds[insId]
 			return ok
@@ -651,6 +690,124 @@ func (i *instanceStore) BatchSetInstanceIsolate(ids []interface{}, isolate int, 
 	}
 
 	return nil
+}
+
+// BatchAppendInstanceMetadata 追加实例 metadata
+func (i *instanceStore) BatchAppendInstanceMetadata(requests []*store.InstanceMetadataRequest) error {
+	if len(requests) == 0 {
+		return nil
+	}
+	return i.handler.Execute(true, func(tx *bolt.Tx) error {
+		values := map[string]interface{}{}
+		fields := []string{insFieldProto, insFieldValid}
+		if err := loadValuesByFilter(tx, tblNameInstance, fields, &model.Instance{},
+			func(m map[string]interface{}) bool {
+				valid, ok := m[insFieldValid]
+				if ok && !valid.(bool) {
+					return false
+				}
+				proto, ok := m[insFieldProto]
+				if !ok {
+					return false
+				}
+				insId := proto.(*apiservice.Instance).GetId().GetValue()
+				for i := range requests {
+					if requests[i].InstanceID == insId {
+						return true
+					}
+				}
+				return false
+			}, values); err != nil {
+			log.Errorf("[Store][boltdb] do batch append InstanceMetadata get instances error, %v", err)
+			return err
+		}
+		if len(values) == 0 {
+			return nil
+		}
+		for i := range requests {
+			instanceID := requests[i].InstanceID
+			val, ok := values[instanceID]
+			if !ok {
+				return nil
+			}
+			ins := val.(*model.Instance)
+			if len(ins.Proto.GetMetadata()) == 0 {
+				ins.Proto.Metadata = map[string]string{}
+			}
+			for k, v := range requests[i].Metadata {
+				ins.Proto.Metadata[k] = v
+			}
+			properties := make(map[string]interface{})
+			properties[insFieldProto] = ins.Proto
+			properties[CommonFieldRevision] = requests[i].Revision
+			properties[insFieldModifyTime] = time.Now()
+			if err := updateValue(tx, tblNameInstance, instanceID, properties); err != nil {
+				log.Errorf("[Store][boltdb] do batch append InstanceMetadata update instance by %s error, %v",
+					instanceID, err)
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// BatchRemoveInstanceMetadata 删除实例指定的 metadata
+func (i *instanceStore) BatchRemoveInstanceMetadata(requests []*store.InstanceMetadataRequest) error {
+	if len(requests) == 0 {
+		return nil
+	}
+	return i.handler.Execute(true, func(tx *bolt.Tx) error {
+		values := map[string]interface{}{}
+		fields := []string{insFieldProto, insFieldValid}
+		if err := loadValuesByFilter(tx, tblNameInstance, fields, &model.Instance{},
+			func(m map[string]interface{}) bool {
+				valid, ok := m[insFieldValid]
+				if ok && !valid.(bool) {
+					return false
+				}
+				proto, ok := m[insFieldProto]
+				if !ok {
+					return false
+				}
+				insId := proto.(*apiservice.Instance).GetId().GetValue()
+				for i := range requests {
+					if requests[i].InstanceID == insId {
+						return true
+					}
+				}
+				return false
+			}, values); err != nil {
+			log.Errorf("[Store][boltdb] do batch remove InstanceMetadata get instances error, %v", err)
+			return err
+		}
+		if len(values) == 0 {
+			return nil
+		}
+		for i := range requests {
+			instanceID := requests[i].InstanceID
+			val, ok := values[instanceID]
+			if !ok {
+				continue
+			}
+			ins := val.(*model.Instance)
+			if len(ins.Proto.GetMetadata()) == 0 {
+				ins.Proto.Metadata = map[string]string{}
+			}
+			for p := range requests[i].Keys {
+				delete(ins.Proto.Metadata, requests[i].Keys[p])
+			}
+			properties := make(map[string]interface{})
+			properties[insFieldProto] = ins.Proto
+			properties[CommonFieldRevision] = requests[i].Revision
+			properties[insFieldModifyTime] = time.Now()
+			if err := updateValue(tx, tblNameInstance, instanceID, properties); err != nil {
+				log.Errorf("[Store][boltdb] do batch remove InstanceMetadata update instance by %s error, %v",
+					instanceID, err)
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func toInstance(m map[string]interface{}) map[string]*model.Instance {
@@ -691,9 +848,8 @@ func getRealInstancesList(originServices map[string]interface{}, offset, limit u
 			return true
 		} else if instances[i].ModifyTime.Before(instances[j].ModifyTime) {
 			return false
-		} else {
-			return strings.Compare(instances[i].ID(), instances[j].ID()) < 0
 		}
+		return strings.Compare(instances[i].ID(), instances[j].ID()) < 0
 	})
 
 	return instances[beginIndex:endIndex]

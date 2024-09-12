@@ -18,10 +18,11 @@
 package plugin
 
 import (
+	"context"
 	"os"
 	"sync"
 
-	"github.com/polarismesh/polaris-server/common/log"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 // ReportRequest report heartbeat request
@@ -29,6 +30,7 @@ type ReportRequest struct {
 	QueryRequest
 	LocalHost  string
 	CurTimeSec int64
+	Count      int64
 }
 
 // CheckRequest check heartbeat request
@@ -54,11 +56,22 @@ type QueryRequest struct {
 	Healthy    bool
 }
 
+// BatchQueryRequest batch query heartbeat request
+type BatchQueryRequest struct {
+	Requests []*QueryRequest
+}
+
 // QueryResponse query heartbeat response
 type QueryResponse struct {
 	Server           string
 	Exists           bool
 	LastHeartbeatSec int64
+	Count            int64
+}
+
+// BatchQueryResponse batch query heartbeat response
+type BatchQueryResponse struct {
+	Responses []*QueryResponse
 }
 
 // AddCheckRequest add check request
@@ -84,17 +97,21 @@ type HealthChecker interface {
 	// Type for health check plugin, only one same type plugin is allowed
 	Type() HealthCheckType
 	// Report process heartbeat info report
-	Report(request *ReportRequest) error
+	Report(ctx context.Context, request *ReportRequest) error
 	// Check process the instance check
 	Check(request *CheckRequest) (*CheckResponse, error)
 	// Query queries the heartbeat time
-	Query(request *QueryRequest) (*QueryResponse, error)
-	// AddToCheck add the instances to check procedure
-	AddToCheck(request *AddCheckRequest) error
-	// RemoveFromCheck removes the instances from check procedure
-	RemoveFromCheck(request *AddCheckRequest) error
+	Query(ctx context.Context, request *QueryRequest) (*QueryResponse, error)
+	// BatchQuery batch queries the heartbeat time
+	BatchQuery(ctx context.Context, request *BatchQueryRequest) (*BatchQueryResponse, error)
+	// Suspend health checker for entire expired duration manually
+	Suspend()
+	// SuspendTimeSec get the suspend time in seconds
+	SuspendTimeSec() int64
 	// Delete delete the id
-	Delete(id string) error
+	Delete(ctx context.Context, id string) error
+	// DebugHandlers return debug handlers
+	DebugHandlers() []model.DebugHandler
 }
 
 // GetHealthChecker get the health checker by name
@@ -106,7 +123,7 @@ func GetHealthChecker(name string, cfg *ConfigEntry) HealthChecker {
 
 	healthCheckOnce.Do(func() {
 		if err := plugin.Initialize(cfg); err != nil {
-			log.Errorf("plugin init err: %s", err.Error())
+			log.Errorf("HealthChecker plugin init err: %s", err.Error())
 			os.Exit(-1)
 		}
 	})

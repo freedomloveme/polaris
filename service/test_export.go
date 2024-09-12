@@ -20,44 +20,78 @@ package service
 import (
 	"context"
 
-	"github.com/polarismesh/polaris-server/auth"
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/namespace"
-	"github.com/polarismesh/polaris-server/service/batch"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
-	"github.com/polarismesh/polaris-server/store"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/polarismesh/polaris/auth"
+	"github.com/polarismesh/polaris/cache"
+	cachetypes "github.com/polarismesh/polaris/cache/api"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/namespace"
+	"github.com/polarismesh/polaris/service/batch"
+	"github.com/polarismesh/polaris/service/healthcheck"
+	"github.com/polarismesh/polaris/store"
 )
 
+// GetBatchController .
+func (s *Server) GetBatchController() *batch.Controller {
+	return s.bc
+}
+
+// MockBatchController .
+func (s *Server) MockBatchController(bc *batch.Controller) {
+	s.bc = bc
+}
+
+func TestNewServer(mockStore store.Store, nsSvr namespace.NamespaceOperateServer,
+	cacheMgr *cache.CacheManager) *Server {
+	return &Server{
+		storage:             mockStore,
+		namespaceSvr:        nsSvr,
+		caches:              cacheMgr,
+		createServiceSingle: &singleflight.Group{},
+		hooks:               []ResourceHook{},
+	}
+}
+
 // TestInitialize 初始化
-func TestInitialize(ctx context.Context, namingOpt *Config, cacheOpt *cache.Config, bc *batch.Controller,
-	cacheMgr *cache.CacheManager, storage store.Store, namespaceSvr namespace.NamespaceOperateServer,
-	healthSvr *healthcheck.Server, authSvr auth.AuthServer) (DiscoverServer, error) {
-
-	namingServer.healthServer = healthSvr
-
-	namingServer.storage = storage
-
-	// 注入命名空间管理模块
-	namingServer.namespaceSvr = namespaceSvr
-
-	// cache模块，可以不开启
-	// 对于控制台集群，只访问控制台接口的，可以不开启cache
-	if cacheOpt.Open {
-		log.Infof("[Naming][Server] cache is open, can access the client api function")
-		namingServer.caches = cacheMgr
+func TestInitialize(ctx context.Context, namingOpt *Config, cacheOpt *cache.Config,
+	cacheEntries []cachetypes.ConfigEntry, bc *batch.Controller, cacheMgr *cache.CacheManager,
+	storage store.Store, namespaceSvr namespace.NamespaceOperateServer,
+	healthSvr *healthcheck.Server,
+	userMgn auth.UserServer, strategyMgn auth.StrategyServer) (DiscoverServer, DiscoverServer, error) {
+	entrites := []cachetypes.ConfigEntry{}
+	if len(cacheEntries) != 0 {
+		entrites = cacheEntries
+	} else {
+		entrites = GetAllCaches()
 	}
 
-	namingServer.bc = bc
+	actualSvr, proxySvr, err := InitServer(ctx, namingOpt,
+		WithBatchController(bc),
+		WithCacheManager(cacheOpt, cacheMgr, entrites...),
+		WithHealthCheckSvr(healthSvr),
+		WithNamespaceSvr(namespaceSvr),
+		WithStorage(storage),
+	)
+	namingServer = actualSvr
+	return proxySvr, namingServer, err
+}
 
-	// l5service
-	namingServer.l5service = &l5service{}
+// TestSerialCreateInstance .
+func (s *Server) TestSerialCreateInstance(
+	ctx context.Context, svcId string, req *apiservice.Instance, ins *apiservice.Instance) (
+	*model.Instance, *apiservice.Response) {
+	return s.serialCreateInstance(ctx, svcId, req, ins)
+}
 
-	namingServer.createServiceSingle = &singleflight.Group{}
-	namingServer.createNamespaceSingle = &singleflight.Group{}
+// TestSetStore .
+func (s *Server) TestSetStore(storage store.Store) {
+	s.storage = storage
+}
 
-	// 插件初始化
-	pluginInitialize()
-
-	return newServerAuthAbility(namingServer, authSvr), nil
+// TestIsEmptyLocation .
+func TestIsEmptyLocation(loc *apimodel.Location) bool {
+	return isEmptyLocation(loc)
 }

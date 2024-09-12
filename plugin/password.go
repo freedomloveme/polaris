@@ -20,21 +20,19 @@ package plugin
 import (
 	"os"
 	"sync"
-
-	"github.com/polarismesh/polaris-server/common/log"
 )
 
 var (
-	passwordOnce = &sync.Once{}
+	passwordOnce sync.Once
 )
 
-// ParsePassword 密码插件
+// ParsePassword Password plug -in
 type ParsePassword interface {
 	Plugin
 	ParsePassword(cipher string) (string, error)
 }
 
-// GetParsePassword 获取解析密码插件
+// GetParsePassword Get the parsing password plug -in
 func GetParsePassword() ParsePassword {
 	c := &config.ParsePassword
 	plugin, exist := pluginSet[c.Name]
@@ -44,7 +42,7 @@ func GetParsePassword() ParsePassword {
 
 	passwordOnce.Do(func() {
 		if err := plugin.Initialize(c); err != nil {
-			log.Errorf("plugin init err: %s", err.Error())
+			log.Errorf("ParsePassword plugin init err: %s", err.Error())
 			os.Exit(-1)
 		}
 	})

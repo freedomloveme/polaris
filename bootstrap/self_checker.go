@@ -22,21 +22,29 @@ import (
 	"sync"
 	"time"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+
+	api "github.com/polarismesh/polaris/common/api/v1"
+	"github.com/polarismesh/polaris/common/log"
+	"github.com/polarismesh/polaris/service"
+	"github.com/polarismesh/polaris/service/healthcheck"
 )
 
 type SelfHeathChecker struct {
-	instances []*api.Instance
-	interval  int
-	cancel    context.CancelFunc
-	wg        *sync.WaitGroup
-	hcServer  *healthcheck.Server
+	instances   []*apiservice.Instance
+	interval    int
+	cancel      context.CancelFunc
+	wg          *sync.WaitGroup
+	discoverSvr service.DiscoverServer
+	hcServer    *healthcheck.Server
 }
 
-func NewSelfHeathChecker(instances []*api.Instance, interval int) (*SelfHeathChecker, error) {
+func NewSelfHeathChecker(instances []*apiservice.Instance, interval int) (*SelfHeathChecker, error) {
 	hcServer, err := healthcheck.GetServer()
+	if nil != err {
+		return nil, err
+	}
+	discoverSvr, err := service.GetOriginServer()
 	if nil != err {
 		return nil, err
 	}
@@ -45,9 +53,10 @@ func NewSelfHeathChecker(instances []*api.Instance, interval int) (*SelfHeathChe
 			instance.GetHost().GetValue(), instance.GetPort().GetValue())
 	}
 	return &SelfHeathChecker{
-		instances: instances,
-		interval:  interval,
-		hcServer:  hcServer,
+		instances:   instances,
+		interval:    interval,
+		discoverSvr: discoverSvr,
+		hcServer:    hcServer,
 	}, nil
 }
 
@@ -67,7 +76,21 @@ func (s *SelfHeathChecker) Start() {
 		case <-ticker.C:
 			for _, instance := range s.instances {
 				rsp := s.hcServer.Report(context.Background(), instance)
-				if rsp.GetCode().GetValue() != api.ExecuteSuccess {
+
+				switch rsp.GetCode().GetValue() {
+				case api.ExecuteSuccess:
+					continue
+				case api.NotFoundResource:
+					// 这里可能实例被错误摘除了，这里重新触发一次重注册流程，确保核心流程不受影响
+					log.Infof("[Bootstrap] heartbeat not founf instance for %s:%d, code is %d, try re-register",
+						instance.GetHost().GetValue(), instance.GetPort().GetValue(), rsp.GetCode().GetValue())
+					resp := s.discoverSvr.CreateInstances(genContext(), []*apiservice.Instance{instance})
+					if resp.GetCode().GetValue() != api.ExecuteSuccess {
+						log.Errorf("[Bootstrap] re-register fail for %s:%d, code is %d, info %s",
+							instance.GetHost().GetValue(), instance.GetPort().GetValue(),
+							resp.GetCode().GetValue(), resp.GetInfo().GetValue())
+					}
+				default:
 					log.Errorf("[Bootstrap] heartbeat fail for %s:%d, code is %d, info %s",
 						instance.GetHost().GetValue(), instance.GetPort().GetValue(),
 						rsp.GetCode().GetValue(), rsp.GetInfo().GetValue())

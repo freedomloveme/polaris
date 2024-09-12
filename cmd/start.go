@@ -20,7 +20,7 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/polarismesh/polaris-server/bootstrap"
+	"github.com/polarismesh/polaris/bootstrap"
 )
 
 var (
@@ -38,5 +38,5 @@ var (
 
 // init 解析命令参数
 func init() {
-	startCmd.PersistentFlags().StringVarP(&configFilePath, "config", "c", "polaris-server.yaml", "config file path")
+	startCmd.PersistentFlags().StringVarP(&configFilePath, "config", "c", "conf/polaris-server.yaml", "config file path")
 }

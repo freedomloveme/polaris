@@ -22,8 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/polarismesh/polaris-server/common/model"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/polarismesh/polaris/common/model"
 )
 
 func mockConfigFileGroup(total int) []*model.ConfigFileGroup {
@@ -36,6 +37,9 @@ func mockConfigFileGroup(total int) []*model.ConfigFileGroup {
 			CreateTime: time.Now(),
 			ModifyTime: time.Now(),
 			Valid:      true,
+			Metadata: map[string]string{
+				"mock_data": "mock_value",
+			},
 		}
 		ret = append(ret, val)
 	}
@@ -55,11 +59,7 @@ func resetConfigFileGroupTimeAndIDField(tN time.Time, restID bool, datas ...*mod
 func Test_configFileGroupStore(t *testing.T) {
 	t.Run("配置分组插入", func(t *testing.T) {
 		CreateTableDBHandlerAndRun(t, tblConfigFileGroup, func(t *testing.T, handler BoltHandler) {
-			store, err := newConfigFileGroupStore(handler)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			store := newConfigFileGroupStore(handler)
 			total := 10
 			mockGroups := mockConfigFileGroup(total)
 
@@ -91,11 +91,7 @@ func Test_configFileGroupStore(t *testing.T) {
 
 	t.Run("配置分组更新", func(t *testing.T) {
 		CreateTableDBHandlerAndRun(t, tblConfigFileGroup, func(t *testing.T, handler BoltHandler) {
-			store, err := newConfigFileGroupStore(handler)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			store := newConfigFileGroupStore(handler)
 			total := 10
 			mockGroups := mockConfigFileGroup(total)
 
@@ -106,7 +102,7 @@ func Test_configFileGroupStore(t *testing.T) {
 
 				mockGroups[i].Comment = fmt.Sprintf("update_group_%d", i)
 
-				if _, err := store.UpdateConfigFileGroup(mockGroups[i]); err != nil {
+				if err := store.UpdateConfigFileGroup(mockGroups[i]); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -126,41 +122,9 @@ func Test_configFileGroupStore(t *testing.T) {
 		})
 	})
 
-	t.Run("配置分组插入-批量查询", func(t *testing.T) {
-		CreateTableDBHandlerAndRun(t, tblConfigFileGroup, func(t *testing.T, handler BoltHandler) {
-			store, err := newConfigFileGroupStore(handler)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			total := 2
-			mockGroups := mockConfigFileGroup(total)
-			groupNames := make([]string, 0, len(mockGroups))
-
-			for i := 0; i < total; i++ {
-				if _, err := store.CreateConfigFileGroup(mockGroups[i]); err != nil {
-					t.Fatal(err)
-				}
-				groupNames = append(groupNames, mockGroups[i].Name)
-			}
-
-			ret, err := store.FindConfigFileGroups(mockGroups[0].Namespace, groupNames)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			resetConfigFileGroupTimeAndIDField(time.Now(), true, append(mockGroups, ret...)...)
-			assert.ElementsMatch(t, mockGroups, ret)
-		})
-	})
-
 	t.Run("配置分组插入-删除", func(t *testing.T) {
 		CreateTableDBHandlerAndRun(t, tblConfigFileGroup, func(t *testing.T, handler BoltHandler) {
-			store, err := newConfigFileGroupStore(handler)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			store := newConfigFileGroupStore(handler)
 			total := 10
 			mockGroups := mockConfigFileGroup(total)
 

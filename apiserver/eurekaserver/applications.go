@@ -27,8 +27,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/service"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/service"
+)
+
+var (
+	getCacheServicesFunc  = getCacheServices
+	getCacheInstancesFunc = getCacheInstances
 )
 
 // ApplicationsRespCache 全量服务缓存
@@ -74,15 +81,15 @@ func getCacheInstances(namingServer service.DiscoverServer, svcId string) ([]*mo
 // BuildApplications build applications cache with compare to the latest cache
 func (a *ApplicationsBuilder) BuildApplications(oldAppsCache *ApplicationsRespCache) *ApplicationsRespCache {
 	// 获取所有的服务数据
-	var newServices = getCacheServices(a.namingServer, a.namespace)
+	var newServices = getCacheServicesFunc(a.namingServer, a.namespace)
 	var instCount int
 	svcToRevision := make(map[string]string, len(newServices))
 	svcToToInstances := make(map[string][]*model.Instance)
 	var changed bool
 	for _, newService := range newServices {
-		instances, revision, err := getCacheInstances(a.namingServer, newService.ID)
+		instances, revision, err := getCacheInstancesFunc(a.namingServer, newService.ID)
 		if err != nil {
-			log.Errorf("[EurekaServer]fail to get revision for service %s, err is %v", newService.Name, err)
+			eurekalog.Errorf("[EurekaServer]fail to get revision for service %s, err is %v", newService.Name, err)
 			continue
 		}
 		// eureka does not return services without instances
@@ -90,8 +97,9 @@ func (a *ApplicationsBuilder) BuildApplications(oldAppsCache *ApplicationsRespCa
 			continue
 		}
 		instCount += len(instances)
-		svcToRevision[newService.Name] = revision
-		svcToToInstances[newService.Name] = instances
+		svcName := formatReadName(newService.Name)
+		svcToRevision[svcName] = revision
+		svcToToInstances[svcName] = instances
 	}
 	// 比较并构建Applications缓存
 	hashBuilder := make(map[string]int)
@@ -126,8 +134,10 @@ func (a *ApplicationsBuilder) BuildApplications(oldAppsCache *ApplicationsRespCa
 				hashBuilder[status] = hashBuilder[status] + count
 			}
 		}
-		newApps.Application = append(newApps.Application, targetApp)
-		newApps.ApplicationMap[targetApp.Name] = targetApp
+		if len(targetApp.Instance) > 0 {
+			newApps.Application = append(newApps.Application, targetApp)
+			newApps.ApplicationMap[targetApp.Name] = targetApp
+		}
 	}
 	if oldApps != nil && len(oldApps.Application) != len(newApps.Application) {
 		changed = true
@@ -136,53 +146,18 @@ func (a *ApplicationsBuilder) BuildApplications(oldAppsCache *ApplicationsRespCa
 	return constructResponseCache(newApps, instCount, false)
 }
 
-func filterLatestHealthyInstances(instances []*model.Instance) ([]*model.Instance, int) {
-	var out = make([]*model.Instance, 0, len(instances))
-	var healthyCount = 0
-	for _, instance := range instances {
-		if instance.Healthy() {
-			out = append(out, instance)
-			healthyCount++
-			continue
-		}
-		healthCheck := instance.HealthCheck()
-		if healthCheck == nil {
-			continue
-		}
-		modifySince := time.Since(instance.ModifyTime)
-		if modifySince < DefaultSelfPreservationDuration {
-			out = append(out, instance)
-		}
-	}
-	return out, healthyCount
-}
-
 func (a *ApplicationsBuilder) constructApplication(app *Application, instances []*model.Instance) {
 	if len(instances) == 0 {
 		return
 	}
 	app.StatusCounts = make(map[string]int)
 
-	var fallbackUnhealthy bool
-	var healthyCount int
-	instances, healthyCount = filterLatestHealthyInstances(instances)
-	if a.enableSelfPreservation && len(instances) > 0 {
-		if (healthyCount/len(instances))*100 < DefaultSelfPreservationPercent {
-			fallbackUnhealthy = true
-		}
-	}
-
 	// 转换时候要区分2种情况，一种是从eureka注册上来的，一种不是
 	for _, instance := range instances {
-		if !instance.Healthy() && !fallbackUnhealthy {
+		if !instance.Healthy() {
 			continue
 		}
-		var (
-			instanceInfo     *InstanceInfo
-			eurekaInstanceId = instance.Proto.GetId().GetValue()
-		)
-		instanceInfo = buildInstance(app, eurekaInstanceId, instance)
-		instanceInfo.RealInstances[instance.Revision()] = instance
+		instanceInfo := buildInstance(app.Name, instance.Proto, instance.ModifyTime.UnixNano()/1e6)
 		status := instanceInfo.Status
 		app.StatusCounts[status] = app.StatusCounts[status] + 1
 		app.Instance = append(app.Instance, instanceInfo)
@@ -209,95 +184,46 @@ func buildHashCode(version string, hashBuilder map[string]int, newApps *Applicat
 	newApps.VersionsDelta = version
 }
 
-func (a *ApplicationsBuilder) buildDeltaApps(oldAppsCache *ApplicationsRespCache, newAppsCache *ApplicationsRespCache,
-	latestDeltaAppsCache *ApplicationsRespCache) *ApplicationsRespCache {
-	var instCount int
-	newApps := newAppsCache.AppsResp.Applications
-	// 1. 创建新的delta对象
-	newDeltaApps := &Applications{
-		VersionsDelta: newApps.VersionsDelta,
-		AppsHashCode:  newApps.AppsHashCode,
-		Application:   make([]*Application, 0),
+func parseStatus(instance *apiservice.Instance) string {
+	if !instance.GetIsolate().GetValue() {
+		return StatusUp
 	}
-	// 2. 拷贝老的delta内容
-	var oldDeltaApps *Applications
-	if latestDeltaAppsCache != nil {
-		oldDeltaApps = latestDeltaAppsCache.AppsResp.Applications
-	}
-	if oldDeltaApps != nil && len(oldDeltaApps.Application) > 0 {
-		for _, app := range oldDeltaApps.Application {
-			newDeltaApps.Application = append(newDeltaApps.Application, app)
-			instCount += len(app.Instance)
-		}
-	}
-	// 3. 比较revision是否发生变更
-	if oldAppsCache.Revision != newAppsCache.Revision {
-		// 3. 比较修改和新增
-		oldApps := oldAppsCache.AppsResp.Applications
-		applications := newApps.Application
-		if len(applications) > 0 {
-			for _, application := range applications {
-				var oldApplication = oldApps.GetApplication(application.Name)
-				if oldApplication == nil {
-					// 新增，全部加入
-					newDeltaApps.Application = append(newDeltaApps.Application, application)
-					instCount += len(application.Instance)
-					continue
-				}
-				// 修改，需要比较实例的变更
-				diffApp := diffApplication(oldApplication, application)
-				if diffApp != nil {
-					newDeltaApps.Application = append(newDeltaApps.Application, diffApp)
-					instCount += len(diffApp.Instance)
-				}
-			}
-		}
-		// 4. 比较删除
-		oldApplications := oldApps.Application
-		if len(oldApplications) > 0 {
-			for _, application := range oldApplications {
-				var newApplication = newApps.GetApplication(application.Name)
-				if newApplication == nil {
-					// 删除
-					deletedApplication := &Application{
-						Name: application.Name,
-					}
-					for _, instance := range application.Instance {
-						deletedApplication.Instance = append(deletedApplication.Instance, instance.Clone(ActionDeleted))
-					}
-					newDeltaApps.Application = append(newDeltaApps.Application, deletedApplication)
-					instCount += len(deletedApplication.Instance)
-				}
-			}
-		}
-	}
-	return constructResponseCache(newDeltaApps, instCount, true)
-}
-
-func parseStatus(instance *model.Instance) string {
-	if instance.Proto.GetIsolate().GetValue() {
+	status := instance.Metadata[InternalMetadataStatus]
+	switch status {
+	case StatusDown:
+		return StatusDown
+	default:
 		return StatusOutOfService
 	}
-	return StatusUp
 }
 
-func parsePortWrapper(info *InstanceInfo, instance *model.Instance) {
-	securePort, securePortOk := instance.Metadata()[MetadataSecurePort]
-	securePortEnabled, securePortEnabledOk := instance.Metadata()[MetadataSecurePortEnabled]
-	insecurePort, insecurePortOk := instance.Metadata()[MetadataInsecurePort]
-	insecurePortEnabled, insecurePortEnabledOk := instance.Metadata()[MetadataInsecurePortEnabled]
-
+func parsePortWrapper(info *InstanceInfo, instance *apiservice.Instance) {
+	metadata := instance.GetMetadata()
+	var securePortOk bool
+	var securePortEnabledOk bool
+	var securePort string
+	var securePortEnabled string
+	var insecurePortOk bool
+	var insecurePortEnabledOk bool
+	var insecurePort string
+	var insecurePortEnabled string
+	if len(metadata) > 0 {
+		securePort, securePortOk = instance.GetMetadata()[MetadataSecurePort]
+		securePortEnabled, securePortEnabledOk = instance.GetMetadata()[MetadataSecurePortEnabled]
+		insecurePort, insecurePortOk = instance.GetMetadata()[MetadataInsecurePort]
+		insecurePortEnabled, insecurePortEnabledOk = instance.GetMetadata()[MetadataInsecurePortEnabled]
+	}
 	if securePortOk && securePortEnabledOk && insecurePortOk && insecurePortEnabledOk {
 		// if metadata contains all port/securePort,port.enabled/securePort.enabled
 		sePort, err := strconv.Atoi(securePort)
 		if err != nil {
 			sePort = 0
-			log.Errorf("[EUREKA_SERVER]parse secure port error: %+v", err)
+			eurekalog.Errorf("[EUREKA_SERVER]parse secure port error: %+v", err)
 		}
 		sePortEnabled, err := strconv.ParseBool(securePortEnabled)
 		if err != nil {
 			sePortEnabled = false
-			log.Errorf("[EUREKA_SERVER]parse secure port enabled error: %+v", err)
+			eurekalog.Errorf("[EUREKA_SERVER]parse secure port enabled error: %+v", err)
 		}
 
 		info.SecurePort.Port = sePort
@@ -306,26 +232,24 @@ func parsePortWrapper(info *InstanceInfo, instance *model.Instance) {
 		insePort, err := strconv.Atoi(insecurePort)
 		if err != nil {
 			insePort = 0
-			log.Errorf("[EUREKA_SERVER]parse insecure port error: %+v", err)
+			eurekalog.Errorf("[EUREKA_SERVER]parse insecure port error: %+v", err)
 		}
 		insePortEnabled, err := strconv.ParseBool(insecurePortEnabled)
 		if err != nil {
 			insePortEnabled = false
-			log.Errorf("[EUREKA_SERVER]parse insecure port enabled error: %+v", err)
+			eurekalog.Errorf("[EUREKA_SERVER]parse insecure port enabled error: %+v", err)
 		}
 
 		info.Port.Port = insePort
 		info.Port.Enabled = insePortEnabled
-
 	} else {
-		protocol := instance.Proto.GetProtocol().GetValue()
-		port := instance.Proto.GetPort().GetValue()
+		protocol := instance.GetProtocol().GetValue()
+		port := instance.GetPort().GetValue()
 		if protocol == SecureProtocol {
 			info.SecurePort.Port = int(port)
 			info.SecurePort.Enabled = "true"
-			if len(instance.Metadata()) > 0 {
-				insecurePortStr, ok := instance.Metadata()[MetadataInsecurePort]
-				if ok {
+			if len(metadata) > 0 {
+				if insecurePortStr, ok := metadata[MetadataInsecurePort]; ok {
 					insecurePort, _ := strconv.Atoi(insecurePortStr)
 					if insecurePort > 0 {
 						info.Port.Port = insecurePort
@@ -340,10 +264,12 @@ func parsePortWrapper(info *InstanceInfo, instance *model.Instance) {
 	}
 }
 
-func parseLeaseInfo(leaseInfo *LeaseInfo, instance *model.Instance) {
-	metadata := instance.Proto.GetMetadata()
-	var durationInSec int
-	var renewIntervalSec int
+func parseLeaseInfo(leaseInfo *LeaseInfo, instance *apiservice.Instance) {
+	var (
+		metadata         = instance.GetMetadata()
+		durationInSec    int
+		renewIntervalSec int
+	)
 	if metadata != nil {
 		durationInSecStr, ok := metadata[MetadataDuration]
 		if ok {
@@ -362,7 +288,7 @@ func parseLeaseInfo(leaseInfo *LeaseInfo, instance *model.Instance) {
 	}
 }
 
-func buildInstance(app *Application, eurekaInstanceId string, instance *model.Instance) *InstanceInfo {
+func buildInstance(appName string, instance *apiservice.Instance, lastModifyTime int64) *InstanceInfo {
 	instanceInfo := &InstanceInfo{
 		CountryId: DefaultCountryIdInt,
 		Port: &PortWrapper{
@@ -380,19 +306,22 @@ func buildInstance(app *Application, eurekaInstanceId string, instance *model.In
 		Metadata: &Metadata{
 			Meta: make(map[string]interface{}),
 		},
-		RealInstances: make(map[string]*model.Instance),
+		RealInstance: instance,
 	}
-	instanceInfo.AppName = app.Name
+	instanceInfo.AppName = appName
 	// 属于eureka注册的实例
-	instanceInfo.InstanceId = eurekaInstanceId
-	metadata := instance.Metadata()
+	instanceInfo.InstanceId = instance.GetId().GetValue()
+	metadata := instance.GetMetadata()
 	if metadata == nil {
 		metadata = map[string]string{}
+	}
+	if eurekaInstanceId, ok := metadata[MetadataInstanceId]; ok {
+		instanceInfo.InstanceId = eurekaInstanceId
 	}
 	if hostName, ok := metadata[MetadataHostName]; ok {
 		instanceInfo.HostName = hostName
 	}
-	instanceInfo.IpAddr = instance.Proto.GetHost().GetValue()
+	instanceInfo.IpAddr = instance.GetHost().GetValue()
 	instanceInfo.Status = parseStatus(instance)
 	instanceInfo.OverriddenStatus = StatusUnknown
 	parsePortWrapper(instanceInfo, instance)
@@ -410,7 +339,7 @@ func buildInstance(app *Application, eurekaInstanceId string, instance *model.In
 			Name:  dciName,
 		}
 	} else {
-		instanceInfo.DataCenterInfo = DefaultDataCenterInfo
+		instanceInfo.DataCenterInfo = buildDataCenterInfo()
 	}
 	parseLeaseInfo(instanceInfo.LeaseInfo, instance)
 	for metaKey, metaValue := range metadata {
@@ -435,22 +364,44 @@ func buildInstance(app *Application, eurekaInstanceId string, instance *model.In
 		instanceInfo.SecureVipAddress = address
 	}
 	if instanceInfo.VipAddress == "" {
-		instanceInfo.VipAddress = app.Name
+		instanceInfo.VipAddress = appName
 	}
 	if instanceInfo.HostName == "" {
-		instanceInfo.HostName = instance.Proto.GetHost().GetValue()
+		instanceInfo.HostName = instance.GetHost().GetValue()
 	}
 	buildLocationInfo(instanceInfo, instance)
-	instanceInfo.LastUpdatedTimestamp = strconv.Itoa(int(instance.ModifyTime.UnixNano() / 1e6))
+	instanceInfo.LastUpdatedTimestamp = strconv.Itoa(int(lastModifyTime))
 	instanceInfo.ActionType = ActionAdded
 	return instanceInfo
 }
 
-func buildLocationInfo(instanceInfo *InstanceInfo, instance *model.Instance) {
+func buildDataCenterInfo() *DataCenterInfo {
+	customDciClass, ok1 := CustomEurekaParameters[CustomKeyDciClass]
+	customDciName, ok2 := CustomEurekaParameters[CustomKeyDciName]
+	if ok1 && ok2 {
+		return &DataCenterInfo{
+			Clazz: customDciClass,
+			Name:  customDciName,
+		}
+	} else if ok1 && !ok2 {
+		return &DataCenterInfo{
+			Clazz: customDciClass,
+			Name:  DefaultDciName,
+		}
+	} else if !ok1 && ok2 {
+		return &DataCenterInfo{
+			Clazz: DefaultDciClazz,
+			Name:  customDciName,
+		}
+	}
+	return DefaultDataCenterInfo
+}
+
+func buildLocationInfo(instanceInfo *InstanceInfo, instance *apiservice.Instance) {
 	var region string
 	var zone string
 	var campus string
-	if location := instance.Location(); location != nil {
+	if location := instance.GetLocation(); location != nil {
 		region = location.GetRegion().GetValue()
 		zone = location.GetZone().GetValue()
 		campus = location.GetCampus().GetValue()
@@ -482,20 +433,20 @@ func constructResponseCache(newApps *Applications, instCount int, delta bool) *A
 	// 预先做一次序列化，以免高并发时候序列化会使得内存峰值过高
 	jsonBytes, err := json.MarshalIndent(newAppsCache.AppsResp, "", " ")
 	if err != nil {
-		log.Errorf("[EUREKA_SERVER]fail to marshal apps %s to json, err is %v", appsHashCode, err)
+		eurekalog.Errorf("[EUREKA_SERVER]fail to marshal apps %s to json, err is %v", appsHashCode, err)
 	} else {
 		newAppsCache.JsonBytes = jsonBytes
 	}
 	xmlBytes, err := xml.MarshalIndent(newAppsCache.AppsResp.Applications, " ", " ")
 	if err != nil {
-		log.Errorf("[EUREKA_SERVER]fail to marshal apps %s to xml, err is %v", appsHashCode, err)
+		eurekalog.Errorf("[EUREKA_SERVER]fail to marshal apps %s to xml, err is %v", appsHashCode, err)
 	} else {
 		newAppsCache.XmlBytes = xmlBytes
 	}
 	if !delta && len(jsonBytes) > 0 {
 		newAppsCache.Revision = sha1s(jsonBytes)
 	}
-	log.Infof("[EUREKA_SERVER]success to build apps cache, delta is %v, "+
+	eurekalog.Infof("[EUREKA_SERVER]success to build apps cache, delta is %v, "+
 		"length xmlBytes is %d, length jsonBytes is %d, instCount is %d", delta, len(xmlBytes), len(jsonBytes), instCount)
 	return newAppsCache
 }

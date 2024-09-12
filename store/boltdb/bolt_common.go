@@ -18,9 +18,10 @@
 package boltdb
 
 import (
-	"github.com/boltdb/bolt"
-	"github.com/polarismesh/polaris-server/store"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/polarismesh/polaris/store"
 )
 
 type transactionFunc func(tx *bolt.Tx) ([]interface{}, error)
@@ -40,7 +41,7 @@ func DoTransactionIfNeed(sTx store.Tx, handler BoltHandler, handle transactionFu
 	tx := sTx.GetDelegateTx().(*bolt.Tx)
 	defer func() {
 		if autoManageTx {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 

@@ -20,23 +20,27 @@ package grpcserver
 import (
 	"context"
 	"fmt"
-	"github.com/polarismesh/polaris-server/common/secure"
-	"google.golang.org/grpc/credentials"
 	"net"
 	"net/http"
-	"strings"
+	"runtime"
 	"time"
 
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/connlimit"
-	"github.com/polarismesh/polaris-server/common/utils"
-	"github.com/polarismesh/polaris-server/plugin"
+	api "github.com/polarismesh/polaris/common/api/v1"
+	connhook "github.com/polarismesh/polaris/common/conn/hook"
+	connlimit "github.com/polarismesh/polaris/common/conn/limit"
+	commonlog "github.com/polarismesh/polaris/common/log"
+	"github.com/polarismesh/polaris/common/metrics"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/common/secure"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/plugin"
 )
 
 // InitServer BaseGrpcServer.Run 中回调函数的定义
@@ -54,6 +58,8 @@ type BaseGrpcServer struct {
 
 	protocol string
 
+	bz authcommon.BzModule
+
 	server     *grpc.Server
 	statis     plugin.Statis
 	ratelimit  plugin.Ratelimit
@@ -61,6 +67,8 @@ type BaseGrpcServer struct {
 
 	cache   Cache
 	convert MessageToCache
+
+	log *commonlog.Scope
 }
 
 // GetPort get the connector listen port value
@@ -70,7 +78,6 @@ func (b *BaseGrpcServer) GetPort() uint32 {
 
 // Initialize init the gRPC server
 func (b *BaseGrpcServer) Initialize(ctx context.Context, conf map[string]interface{}, initOptions ...InitOption) error {
-
 	for i := range initOptions {
 		initOptions[i](b)
 	}
@@ -92,14 +99,14 @@ func (b *BaseGrpcServer) Initialize(ctx context.Context, conf map[string]interfa
 			return err
 		}
 		b.tlsInfo = &secure.TLSInfo{
-			CertFile:      tlsConfig.Cert,
-			KeyFile:       tlsConfig.Key,
-			TrustedCAFile: tlsConfig.CaCert,
+			CertFile:      tlsConfig.CertFile,
+			KeyFile:       tlsConfig.KeyFile,
+			TrustedCAFile: tlsConfig.TrustedCAFile,
 		}
 	}
 
 	if ratelimit := plugin.GetRatelimit(); ratelimit != nil {
-		log.Infof("[API-Server] %s server open the ratelimit", b.protocol)
+		b.log.Infof("[API-Server] %s server open the ratelimit", b.protocol)
 		b.ratelimit = ratelimit
 	}
 
@@ -116,7 +123,7 @@ func (b *BaseGrpcServer) Stop(protocol string) {
 
 // Run server main loop
 func (b *BaseGrpcServer) Run(errCh chan error, protocol string, initServer InitServer) {
-	log.Infof("[API-Server] start %s server", protocol)
+	b.log.Infof("[API-Server] start %s server", protocol)
 	b.exitCh = make(chan struct{})
 	b.start = true
 	defer func() {
@@ -127,7 +134,7 @@ func (b *BaseGrpcServer) Run(errCh chan error, protocol string, initServer InitS
 	address := fmt.Sprintf("%v:%v", b.listenIP, b.listenPort)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Error("[API-Server][GRPC] %v", zap.Error(err))
+		b.log.Error("[API-Server][GRPC] %v", zap.Error(err))
 		errCh <- err
 		return
 	}
@@ -135,23 +142,27 @@ func (b *BaseGrpcServer) Run(errCh chan error, protocol string, initServer InitS
 
 	// 如果设置最大连接数
 	if b.connLimitConfig != nil && b.connLimitConfig.OpenConnLimit {
-		log.Infof("[API-Server][GRPC] grpc server use max connection limit: %d, grpc max limit: %d",
+		b.log.Infof("[API-Server][GRPC] grpc server use max connection limit: %d, grpc max limit: %d",
 			b.connLimitConfig.MaxConnPerHost, b.connLimitConfig.MaxConnLimit)
 		listener, err = connlimit.NewListener(listener, protocol, b.connLimitConfig)
 		if err != nil {
-			log.Error("[API-Server][GRPC] conn limit init", zap.Error(err))
+			b.log.Error("[API-Server][GRPC] conn limit init", zap.Error(err))
 			errCh <- err
 			return
 		}
-
 	}
+
+	b.log.Infof("[API-Server][GRPC] open connection counter net.Listener")
+	listener = connhook.NewHookListener(listener, &connCounterHook{
+		bz: b.bz,
+	})
 
 	// 指定使用服务端证书创建一个 TLS credentials
 	var creds credentials.TransportCredentials
 	if !b.tlsInfo.IsEmpty() {
 		creds, err = credentials.NewServerTLSFromFile(b.tlsInfo.CertFile, b.tlsInfo.KeyFile)
 		if err != nil {
-			log.Error("failed to create credentials: %v", zap.Error(err))
+			b.log.Error("failed to create credentials: %v", zap.Error(err))
 			errCh <- err
 			return
 		}
@@ -177,12 +188,12 @@ func (b *BaseGrpcServer) Run(errCh chan error, protocol string, initServer InitS
 	b.statis = plugin.GetStatis()
 
 	if err := server.Serve(listener); err != nil {
-		log.Errorf("[API-Server][GRPC] %v", err)
+		b.log.Errorf("[API-Server][GRPC] %v", err)
 		errCh <- err
 		return
 	}
 
-	log.Infof("[API-Server] %s server stop", protocol)
+	b.log.Infof("[API-Server] %s server stop", protocol)
 }
 
 var notPrintableMethods = map[string]bool{
@@ -191,9 +202,9 @@ var notPrintableMethods = map[string]bool{
 
 func (b *BaseGrpcServer) unaryInterceptor(ctx context.Context, req interface{},
 	info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (rsp interface{}, err error) {
-
 	stream := newVirtualStream(ctx,
 		WithVirtualStreamBaseServer(b),
+		WithVirtualStreamLogger(b.log),
 		WithVirtualStreamMethod(info.FullMethod),
 		WithVirtualStreamPreProcessFunc(b.preprocess),
 		WithVirtualStreamPostProcessFunc(b.postprocess),
@@ -208,15 +219,23 @@ func (b *BaseGrpcServer) unaryInterceptor(ctx context.Context, req interface{},
 
 		// 判断是否允许访问
 		if ok := b.AllowAccess(stream.Method); !ok {
-			rsp = api.NewResponse(api.ClientAPINotOpen)
+			rsp = api.NewResponse(apimodel.Code_ClientAPINotOpen)
 			return
 		}
 
 		// handler执行前，限流
-		if code := b.EnterRatelimit(stream.ClientIP, stream.Method); code != api.ExecuteSuccess {
-			rsp = api.NewResponse(code)
+		if code := b.EnterRatelimit(stream.ClientIP, stream.Method); code != uint32(api.ExecuteSuccess) {
+			rsp = api.NewResponse(apimodel.Code(code))
 			return
 		}
+		defer func() {
+			if panicInfo := recover(); panicInfo != nil {
+				var buf [4086]byte
+				n := runtime.Stack(buf[:], false)
+				b.log.Errorf("panic %+v", string(buf[:n]))
+			}
+		}()
+
 		rsp, err = handler(ctx, req)
 	}()
 
@@ -225,9 +244,12 @@ func (b *BaseGrpcServer) unaryInterceptor(ctx context.Context, req interface{},
 	return
 }
 
+func (b *BaseGrpcServer) recoverFunc(i interface{}, w http.ResponseWriter) {
+
+}
+
 func (b *BaseGrpcServer) streamInterceptor(srv interface{}, ss grpc.ServerStream,
 	info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
-
 	stream := newVirtualStream(ss.Context(),
 		WithVirtualStreamBaseServer(b),
 		WithVirtualStreamServerStream(ss),
@@ -236,19 +258,45 @@ func (b *BaseGrpcServer) streamInterceptor(srv interface{}, ss grpc.ServerStream
 		WithVirtualStreamPostProcessFunc(b.postprocess),
 	)
 
+	defer func() {
+		if panicInfo := recover(); panicInfo != nil {
+			var buf [4086]byte
+			n := runtime.Stack(buf[:], false)
+			b.log.Errorf("panic recovered: %v, STACK: %s", panicInfo, buf[0:n])
+		}
+	}()
+
 	err = handler(srv, stream)
-	if err != nil { // 存在非EOF读错误或者写错误
-		log.Error("[API-Server][GRPC] handler stream",
-			zap.String("client-address", stream.ClientAddress),
-			zap.String("user-agent", stream.UserAgent),
-			zap.String("request-id", stream.RequestID),
-			zap.String("method", stream.Method),
-			zap.Error(err),
-		)
+	if err != nil {
+		fromError, ok := status.FromError(err)
+		if ok && fromError.Code() == codes.Canceled {
+			// 存在非EOF读错误或者写错误
+			b.log.Info("[API-Server][GRPC] handler stream is canceled by client",
+				zap.String("client-address", stream.ClientAddress),
+				zap.String("user-agent", stream.UserAgent),
+				utils.ZapRequestID(stream.RequestID),
+				zap.String("method", stream.Method),
+				zap.Error(err),
+			)
+		} else {
+			// 存在非EOF读错误或者写错误
+			b.log.Error("[API-Server][GRPC] handler stream",
+				zap.String("client-address", stream.ClientAddress),
+				zap.String("user-agent", stream.UserAgent),
+				utils.ZapRequestID(stream.RequestID),
+				zap.String("method", stream.Method),
+				zap.Error(err),
+			)
+		}
 
-		_ = b.statis.AddAPICall(stream.Method, "gRPC", stream.Code, 0)
+		b.statis.ReportCallMetrics(metrics.CallMetric{
+			Type:     metrics.ServerCallMetric,
+			API:      stream.Method,
+			Protocol: "gRPC",
+			Code:     int(stream.Code),
+			Duration: 0,
+		})
 	}
-
 	return
 }
 
@@ -261,10 +309,10 @@ func (b *BaseGrpcServer) preprocess(stream *VirtualStream, isPrint bool) error {
 
 	if isPrint {
 		// 打印请求
-		log.Info("[API-Server][GRPC] receive request",
+		b.log.Info("[API-Server][GRPC] receive request",
 			zap.String("client-address", stream.ClientAddress),
 			zap.String("user-agent", stream.UserAgent),
-			zap.String("request-id", stream.RequestID),
+			utils.ZapRequestID(stream.RequestID),
 			zap.String("method", stream.Method),
 		)
 	}
@@ -284,10 +332,10 @@ func (b *BaseGrpcServer) postprocess(stream *VirtualStream, m interface{}) {
 
 		// 打印回复
 		if code != http.StatusOK {
-			log.Error("[API-Server][GRPC] send response",
+			b.log.Error("[API-Server][GRPC] send response",
 				zap.String("client-address", stream.ClientAddress),
 				zap.String("user-agent", stream.UserAgent),
-				zap.String("request-id", stream.RequestID),
+				utils.ZapRequestID(stream.RequestID),
 				zap.String("method", stream.Method),
 				zap.String("response", response.String()),
 			)
@@ -299,10 +347,10 @@ func (b *BaseGrpcServer) postprocess(stream *VirtualStream, m interface{}) {
 		code = stream.Code
 		// 打印回复
 		if code != int(codes.OK) {
-			log.Error("[API-Server][GRPC] send response",
+			b.log.Error("[API-Server][GRPC] send response",
 				zap.String("client-address", stream.ClientAddress),
 				zap.String("user-agent", stream.UserAgent),
-				zap.String("request-id", stream.RequestID),
+				utils.ZapRequestID(stream.RequestID),
 				zap.String("method", stream.Method),
 				zap.String("response", response.String()),
 			)
@@ -310,26 +358,32 @@ func (b *BaseGrpcServer) postprocess(stream *VirtualStream, m interface{}) {
 	}
 
 	// 接口调用统计
-	now := time.Now()
-	diff := now.Sub(stream.StartTime)
+	diff := time.Since(stream.StartTime)
 
 	// 打印耗时超过1s的请求
 	if diff > time.Second {
-		log.Info("[API-Server][GRPC] handling time > 1s",
+		b.log.Info("[API-Server][GRPC] handling time > 1s",
 			zap.String("client-address", stream.ClientAddress),
 			zap.String("user-agent", stream.UserAgent),
-			zap.String("request-id", stream.RequestID),
+			utils.ZapRequestID(stream.RequestID),
 			zap.String("method", stream.Method),
 			zap.Duration("handling-time", diff),
 		)
 	}
-	_ = b.statis.AddAPICall(stream.Method, "gRPC", code, diff.Nanoseconds())
+
+	b.statis.ReportCallMetrics(metrics.CallMetric{
+		Type:     metrics.ServerCallMetric,
+		API:      stream.Method,
+		Protocol: "gRPC",
+		Code:     int(stream.Code),
+		Duration: diff,
+	})
 }
 
 // Restart restart gRPC server
 func (b *BaseGrpcServer) Restart(
 	initialize func() error, run func(), protocol string, option map[string]interface{}) error {
-	log.Infof("[API-Server][GRPC] restart %s server with new config: %+v", protocol, option)
+	b.log.Infof("[API-Server][GRPC] restart %s server with new config: %+v", protocol, option)
 
 	b.restart = true
 	b.Stop(protocol)
@@ -337,13 +391,13 @@ func (b *BaseGrpcServer) Restart(
 		<-b.exitCh
 	}
 
-	log.Infof("[API-Server][GRPC] old %s server has stopped, begin restarting it", protocol)
+	b.log.Infof("[API-Server][GRPC] old %s server has stopped, begin restarting it", protocol)
 	if err := initialize(); err != nil {
-		log.Errorf("restart %s server err: %s", protocol, err.Error())
+		b.log.Errorf("restart %s server err: %s", protocol, err.Error())
 		return err
 	}
 
-	log.Infof("[API-Server][GRPC] init %s server successfully, restart it", protocol)
+	b.log.Infof("[API-Server][GRPC] init %s server successfully, restart it", protocol)
 	b.restart = false
 	go run()
 
@@ -358,13 +412,13 @@ func (b *BaseGrpcServer) EnterRatelimit(ip string, method string) uint32 {
 
 	// ipRatelimit
 	if ok := b.ratelimit.Allow(plugin.IPRatelimit, ip); !ok {
-		log.Error("[API-Server][GRPC] ip ratelimit is not allow", zap.String("client-ip", ip),
+		b.log.Error("[API-Server][GRPC] ip ratelimit is not allow", zap.String("client-ip", ip),
 			zap.String("method", method))
 		return api.IPRateLimit
 	}
 	// apiRatelimit
 	if ok := b.ratelimit.Allow(plugin.APIRatelimit, method); !ok {
-		log.Error("[API-Server][GRPC] api rate limit is not allow", zap.String("client-ip", ip),
+		b.log.Error("[API-Server][GRPC] api rate limit is not allow", zap.String("client-ip", ip),
 			zap.String("method", method))
 		return api.APIRateLimit
 	}
@@ -381,40 +435,32 @@ func (b *BaseGrpcServer) AllowAccess(method string) bool {
 	return ok
 }
 
-// ConvertContext 将GRPC上下文转换成内部上下文
-func ConvertContext(ctx context.Context) context.Context {
-	var (
-		requestID = ""
-		userAgent = ""
-	)
-	meta, exist := metadata.FromIncomingContext(ctx)
-	if exist {
-		ids := meta["request-id"]
-		if len(ids) > 0 {
-			requestID = ids[0]
-		}
-		agents := meta["user-agent"]
-		if len(agents) > 0 {
-			userAgent = agents[0]
-		}
-	}
+type connCounterHook struct {
+	bz authcommon.BzModule
+}
 
-	var (
-		clientIP = ""
-		address  = ""
-	)
-	if pr, ok := peer.FromContext(ctx); ok && pr.Addr != nil {
-		address = pr.Addr.String()
-		addrSlice := strings.Split(address, ":")
-		if len(addrSlice) == 2 {
-			clientIP = addrSlice[0]
-		}
+func (h *connCounterHook) OnAccept(conn net.Conn) {
+	if h.bz == authcommon.DiscoverModule {
+		metrics.AddDiscoveryClientConn()
 	}
+	if h.bz == authcommon.ConfigModule {
+		metrics.AddConfigurationClientConn()
+	}
+	metrics.AddSDKClientConn()
+}
 
-	ctx = context.Background()
-	ctx = context.WithValue(ctx, utils.StringContext("request-id"), requestID)
-	ctx = context.WithValue(ctx, utils.StringContext("client-ip"), clientIP)
-	ctx = context.WithValue(ctx, utils.ContextClientAddress, address)
-	ctx = context.WithValue(ctx, utils.StringContext("user-agent"), userAgent)
-	return ctx
+func (h *connCounterHook) OnRelease(conn net.Conn) {
+	if h.bz == authcommon.DiscoverModule {
+		metrics.RemoveDiscoveryClientConn()
+	}
+	if h.bz == authcommon.ConfigModule {
+		metrics.RemoveConfigurationClientConn()
+	}
+	metrics.RemoveSDKClientConn()
+}
+
+func (h *connCounterHook) OnClose() {
+	metrics.ResetDiscoveryClientConn()
+	metrics.ResetConfigurationClientConn()
+	metrics.ResetSDKClientConn()
 }

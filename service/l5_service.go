@@ -27,9 +27,12 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	"github.com/polarismesh/polaris-server/common/api/l5"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/common/utils"
+	"github.com/polarismesh/polaris/common/api/l5"
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/common/model"
+	commontime "github.com/polarismesh/polaris/common/time"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/plugin"
 )
 
 var (
@@ -71,7 +74,7 @@ func (s *Server) SyncByAgentCmd(ctx context.Context, sbac *l5.Cl5SyncByAgentCmd)
 	optList := sbac.GetOptList().GetOpt()
 
 	routes := s.getRoutes(clientIP, optList)
-	modIDList, callees, sidConfigs := s.getCallees(routes)
+	modIDList, callees, sidConfigs := s.getCallees(ctx, routes)
 	policys, sections := s.getPolicysAndSections(modIDList)
 
 	sbaac := &l5.Cl5SyncByAgentAckCmd{
@@ -173,12 +176,12 @@ func (s *Server) getRoutes(clientIP int32, optList []*l5.Cl5OptObj) []*model.Rou
 }
 
 // get callee
-func (s *Server) getCallees(routes []*model.Route) (map[uint32]bool, []*model.Callee, []*model.SidConfig) {
+func (s *Server) getCallees(ctx context.Context, routes []*model.Route) (map[uint32]bool, []*model.Callee, []*model.SidConfig) {
 	modIDList := make(map[uint32]bool)
 	var callees []*model.Callee
 	var sidConfigs []*model.SidConfig
 	for _, entry := range routes {
-		servers := s.getCalleeByRoute(entry) // 返回nil代表没有找到任何实例
+		servers := s.getCalleeByRoute(ctx, entry) // 返回nil代表没有找到任何实例
 		if servers == nil {
 			log.Warnf("[Cl5] can not found the instances for sid(%d:%d)", entry.ModID, entry.CmdID)
 			// Stat::instance()->add_lost_route(sbac.agent_ip(),vt_route[i].modId,vt_route[i].cmdId); TODO
@@ -235,7 +238,7 @@ func (s *Server) RegisterByNameCmd(rbnc *l5.Cl5RegisterByNameCmd) (*l5.Cl5Regist
 }
 
 func (s *Server) computeService(modID uint32, cmdID uint32) *model.Service {
-	sidStr := utils.MarshalModCmd(modID, cmdID)
+	sidStr := model.MarshalModCmd(modID, cmdID)
 	// 根据sid找到所述命名空间
 	namespaces := ComputeNamespace(modID, cmdID)
 	for _, namespace := range namespaces {
@@ -249,7 +252,7 @@ func (s *Server) computeService(modID uint32, cmdID uint32) *model.Service {
 }
 
 // 根据访问关系获取所有符合的被调信息
-func (s *Server) getCalleeByRoute(route *model.Route) []*model.Callee {
+func (s *Server) getCalleeByRoute(ctx context.Context, route *model.Route) []*model.Callee {
 	out := make([]*model.Callee, 0)
 	if route == nil {
 		return nil
@@ -258,11 +261,21 @@ func (s *Server) getCalleeByRoute(route *model.Route) []*model.Callee {
 	if service == nil {
 		return nil
 	}
-	s.RecordDiscoverStatis(service.Name, service.Namespace)
+	plugin.GetStatis().ReportDiscoverCall(metrics.ClientDiscoverMetric{
+		ClientIP:  utils.ParseClientAddress(ctx),
+		Namespace: service.Namespace,
+		Resource:  "l5:" + service.Name,
+		Timestamp: commontime.CurrentMillisecond(),
+	})
 
 	hasInstance := false
 	_ = s.caches.Instance().IteratorInstancesWithService(service.ID,
-		func(key string, entry *model.Instance) (b bool, e error) {
+		func(_ string, entry *model.Instance) (b bool, e error) {
+			// 过滤掉不健康或者隔离状态的server
+			if !entry.Healthy() || entry.Isolate() {
+				return true, nil
+			}
+
 			hasInstance = true
 			// 如果不存在internal-cl5-setId，则默认都是NOSET，适用于别名场景
 			setValue := "NOSET"
@@ -302,7 +315,6 @@ func (s *Server) getCalleeByRoute(route *model.Route) []*model.Callee {
 
 			// 转换ipStr to int
 			ip := ParseIPStr2IntV2(entry.Host())
-
 			callee := &model.Callee{
 				ModID:  route.ModID,
 				CmdID:  route.CmdID,
@@ -333,7 +345,7 @@ func (s *Server) getCalleeByRoute(route *model.Route) []*model.Callee {
 // 注意，sid--> reference，通过索引服务才能拿到真实的数据
 func (s *Server) getSidConfig(modID uint32, cmdID uint32) *model.SidConfig {
 	sid := &model.Sid{ModID: modID, CmdID: cmdID}
-	sidStr := utils.MarshalSid(sid)
+	sidStr := model.MarshalSid(sid)
 
 	// 先获取一下namespace
 	namespaces := ComputeNamespace(modID, cmdID)
@@ -378,7 +390,7 @@ func (s *Server) getSidConfigByName(name string) *model.SidConfig {
 		return nil
 	}
 
-	sid, err := utils.UnmarshalSid(sidMeta)
+	sid, err := model.UnmarshalSid(sidMeta)
 	if err != nil {
 		log.Errorf("[Server] unmarshal sid(%s) err: %s", sidMeta, err.Error())
 		return nil
@@ -422,12 +434,12 @@ func (s *Server) getRealSidConfigMeta(service *model.Service) *model.SidConfig {
 
 // 获取cl5.discover
 func (s *Server) getCl5DiscoverList(ctx context.Context, clientIP uint32) *l5.Cl5L5SvrList {
-	clusterName, _ := ctx.Value(utils.Cl5ServerCluster{}).(string)
+	clusterName, _ := ctx.Value(model.Cl5ServerCluster{}).(string)
 	if clusterName == "" {
 		log.Warnf("[Cl5] get server cluster name is empty")
 		return nil
 	}
-	protocol, _ := ctx.Value(utils.Cl5ServerProtocol{}).(string)
+	protocol, _ := ctx.Value(model.Cl5ServerProtocol{}).(string)
 
 	service := s.getCl5DiscoverService(clusterName, clientIP)
 	if service == nil {
@@ -449,7 +461,7 @@ func (s *Server) getCl5DiscoverList(ctx context.Context, clientIP uint32) *l5.Cl
 			continue
 		}
 		// 过滤掉不健康或者隔离状态的server
-		if !entry.Healthy() == false || entry.Isolate() {
+		if !entry.Healthy() || entry.Isolate() {
 			continue
 		}
 		ip := ParseIPStr2IntV2(entry.Host())

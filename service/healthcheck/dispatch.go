@@ -23,8 +23,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+
+	commonhash "github.com/polarismesh/polaris/common/hash"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 const (
@@ -44,9 +46,11 @@ type Dispatcher struct {
 	managedInstances            map[string]*InstanceWithChecker
 	managedClients              map[string]*ClientWithChecker
 
-	selfServiceBuckets map[Bucket]bool
-	continuum          *Continuum
+	selfServiceBuckets map[commonhash.Bucket]bool
+	continuum          *commonhash.Continuum
 	mutex              *sync.Mutex
+
+	noAvailableServers bool
 }
 
 func newDispatcher(ctx context.Context, svr *Server) *Dispatcher {
@@ -54,7 +58,6 @@ func newDispatcher(ctx context.Context, svr *Server) *Dispatcher {
 		svr:   svr,
 		mutex: &sync.Mutex{},
 	}
-	dispatcher.startDispatchingJob(ctx)
 	return dispatcher
 }
 
@@ -96,7 +99,7 @@ func (d *Dispatcher) startDispatchingJob(ctx context.Context) {
 
 const weight = 100
 
-func compareBuckets(src map[Bucket]bool, dst map[Bucket]bool) bool {
+func compareBuckets(src map[commonhash.Bucket]bool, dst map[commonhash.Bucket]bool) bool {
 	if len(src) != len(dst) {
 		return false
 	}
@@ -112,23 +115,33 @@ func compareBuckets(src map[Bucket]bool, dst map[Bucket]bool) bool {
 }
 
 func (d *Dispatcher) reloadSelfContinuum() bool {
-	nextBuckets := make(map[Bucket]bool)
-	d.svr.cacheProvider.RangeSelfServiceInstances(func(instance *api.Instance) {
+	nextBuckets := make(map[commonhash.Bucket]bool)
+	d.svr.cacheProvider.RangeSelfServiceInstances(func(instance *apiservice.Instance) {
 		if instance.GetIsolate().GetValue() || !instance.GetHealthy().GetValue() {
 			return
 		}
-		nextBuckets[Bucket{
+		nextBuckets[commonhash.Bucket{
 			Host:   instance.GetHost().GetValue(),
 			Weight: weight,
 		}] = true
 	})
+	if len(nextBuckets) == 0 {
+		d.noAvailableServers = true
+	}
 	originBucket := d.selfServiceBuckets
 	log.Debugf("[Health Check][Dispatcher]reload continuum by %v, origin is %v", nextBuckets, originBucket)
 	if compareBuckets(originBucket, nextBuckets) {
 		return false
 	}
+	if d.noAvailableServers && len(nextBuckets) > 0 {
+		// no available buckets, we need to suspend all the checkers
+		for _, checker := range d.svr.checkers {
+			checker.Suspend()
+		}
+		d.noAvailableServers = false
+	}
 	d.selfServiceBuckets = nextBuckets
-	d.continuum = New(d.selfServiceBuckets)
+	d.continuum = commonhash.New(d.selfServiceBuckets)
 	return true
 }
 
@@ -145,9 +158,9 @@ func (d *Dispatcher) reloadManagedClients() {
 		})
 	}
 	log.Infof("[Health Check][Dispatcher]count %d clients has been dispatched to %s, total is %d",
-		len(nextClients), d.svr.localHost, d.svr.cacheProvider.healthCheckInstances.Count())
+		len(nextClients), d.svr.localHost, d.svr.cacheProvider.healthCheckClients.Count())
 	originClients := d.managedClients
-	d.managedClients = originClients
+	d.managedClients = nextClients
 	if len(nextClients) > 0 {
 		for id, client := range nextClients {
 			if len(originClients) == 0 {
@@ -174,7 +187,6 @@ func (d *Dispatcher) reloadManagedClients() {
 
 func (d *Dispatcher) reloadManagedInstances() {
 	nextInstances := make(map[string]*InstanceWithChecker)
-
 	if d.continuum != nil {
 		d.svr.cacheProvider.RangeHealthCheckInstances(func(itemChecker ItemWithChecker, instance *model.Instance) {
 			instanceId := instance.ID()
@@ -189,14 +201,8 @@ func (d *Dispatcher) reloadManagedInstances() {
 	originInstances := d.managedInstances
 	d.managedInstances = nextInstances
 	if len(nextInstances) > 0 {
-		for id, instance := range nextInstances {
-			if len(originInstances) == 0 {
-				d.svr.checkScheduler.AddInstance(instance)
-				continue
-			}
-			if _, ok := originInstances[id]; !ok {
-				d.svr.checkScheduler.AddInstance(instance)
-			}
+		for _, instance := range nextInstances {
+			d.svr.checkScheduler.UpsertInstance(instance)
 		}
 	}
 	if len(originInstances) > 0 {

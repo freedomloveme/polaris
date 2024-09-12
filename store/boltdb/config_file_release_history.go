@@ -23,15 +23,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/boltdb/bolt"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/store"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/store"
 )
 
 const (
-	tblConfigFileReleaseHistory   string = "ConfigFileReleaseHistory"
-	tblConfigFileReleaseHistoryID string = "ConfigFileReleaseHistoryID"
+	tblConfigFileReleaseHistory string = "ConfigFileReleaseHistory"
 
 	FileHistoryFieldId         string = "Id"
 	FileHistoryFieldName       string = "Name"
@@ -53,68 +53,61 @@ const (
 )
 
 type configFileReleaseHistoryStore struct {
-	id      uint64
 	handler BoltHandler
 }
 
-func newConfigFileReleaseHistoryStore(handler BoltHandler) (*configFileReleaseHistoryStore, error) {
-	s := &configFileReleaseHistoryStore{handler: handler, id: 0}
-	ret, err := handler.LoadValues(tblConfigFileReleaseHistoryID, []string{tblConfigFileReleaseHistoryID}, &IDHolder{})
-	if err != nil {
-		return nil, err
-	}
-	if len(ret) == 0 {
-		return s, err
-	}
-	val := ret[tblConfigFileReleaseHistoryID].(*IDHolder)
-	s.id = val.ID
-	return s, nil
+func newConfigFileReleaseHistoryStore(handler BoltHandler) *configFileReleaseHistoryStore {
+	s := &configFileReleaseHistoryStore{handler: handler}
+	return s
 }
 
 // CreateConfigFileReleaseHistory 创建配置文件发布历史记录
-func (rh *configFileReleaseHistoryStore) CreateConfigFileReleaseHistory(proxyTx store.Tx,
-	fileReleaseHistory *model.ConfigFileReleaseHistory) error {
+func (rh *configFileReleaseHistoryStore) CreateConfigFileReleaseHistory(
+	history *model.ConfigFileReleaseHistory) error {
 
-	_, err := DoTransactionIfNeed(proxyTx, rh.handler, func(tx *bolt.Tx) ([]interface{}, error) {
-		rh.id++
-		fileReleaseHistory.Id = rh.id
-
-		if err := saveValue(tx, tblConfigFileReleaseHistoryID, tblConfigFileReleaseHistoryID, &IDHolder{
-			ID: rh.id,
-		}); err != nil {
-			log.Error("[ConfigFileReleaseHistory] save auto_increment id", zap.Error(err))
-			return nil, err
+	err := rh.handler.Execute(true, func(tx *bolt.Tx) error {
+		table, err := tx.CreateBucketIfNotExists([]byte(tblConfigFileReleaseHistory))
+		if err != nil {
+			return err
+		}
+		nextId, err := table.NextSequence()
+		if err != nil {
+			return err
 		}
 
-		key := strconv.FormatUint(rh.id, 10)
+		history.Id = nextId
+		key := strconv.FormatUint(history.Id, 10)
+		history.Valid = true
+		history.CreateTime = time.Now()
+		history.ModifyTime = history.CreateTime
 
-		fileReleaseHistory.Valid = true
-		fileReleaseHistory.CreateTime = time.Now()
-		fileReleaseHistory.ModifyTime = fileReleaseHistory.CreateTime
-
-		if err := saveValue(tx, tblConfigFileReleaseHistory, key, fileReleaseHistory); err != nil {
+		if err := saveValue(tx, tblConfigFileReleaseHistory, key, history); err != nil {
 			log.Error("[ConfigFileReleaseHistory] save info", zap.Error(err))
-			return nil, err
+			return err
 		}
-
-		return nil, nil
+		return nil
 	})
 
-	return err
+	return store.Error(err)
 }
 
 // QueryConfigFileReleaseHistories 获取配置文件的发布历史记录
-func (rh *configFileReleaseHistoryStore) QueryConfigFileReleaseHistories(namespace, group,
-	fileName string, offset, limit uint32, endId uint64) (uint32, []*model.ConfigFileReleaseHistory, error) {
+func (rh *configFileReleaseHistoryStore) QueryConfigFileReleaseHistories(filter map[string]string,
+	offset, limit uint32) (uint32, []*model.ConfigFileReleaseHistory, error) {
 
-	fields := []string{FileHistoryFieldNamespace, FileHistoryFieldGroup, FileHistoryFieldFileName, FileHistoryFieldId}
-
-	hasNs := len(namespace) > 0
-	hasEndId := endId > 0
+	var (
+		namespace = filter["namespace"]
+		group     = filter["group"]
+		fileName  = filter["file_name"]
+		endId, _  = strconv.ParseUint(filter["endId"], 10, 64)
+		fields    = []string{FileHistoryFieldNamespace, FileHistoryFieldGroup,
+			FileHistoryFieldFileName, FileHistoryFieldId}
+		hasNs    = len(namespace) > 0
+		hasEndId = endId > 0
+	)
 
 	ret, err := rh.handler.LoadValuesByFilter(tblConfigFileReleaseHistory, fields,
 		&model.ConfigFileReleaseHistory{}, func(m map[string]interface{}) bool {
-
 			saveNs, _ := m[FileHistoryFieldNamespace].(string)
 			saveFileGroup, _ := m[FileHistoryFieldGroup].(string)
 			saveFileName, _ := m[FileHistoryFieldFileName].(string)
@@ -142,12 +135,9 @@ func (rh *configFileReleaseHistoryStore) QueryConfigFileReleaseHistories(namespa
 // GetLatestConfigFileReleaseHistory 获取最后一次发布记录
 func (rh *configFileReleaseHistoryStore) GetLatestConfigFileReleaseHistory(namespace, group,
 	fileName string) (*model.ConfigFileReleaseHistory, error) {
-
 	fields := []string{FileHistoryFieldNamespace, FileHistoryFieldGroup, FileHistoryFieldFileName}
-
 	ret, err := rh.handler.LoadValuesByFilter(tblConfigFileReleaseHistory, fields,
 		&model.ConfigFileReleaseHistory{}, func(m map[string]interface{}) bool {
-
 			saveNs, _ := m[FileHistoryFieldNamespace].(string)
 			saveFileGroup, _ := m[FileHistoryFieldGroup].(string)
 			saveFileName, _ := m[FileHistoryFieldFileName].(string)
@@ -178,14 +168,36 @@ func (rh *configFileReleaseHistoryStore) GetLatestConfigFileReleaseHistory(names
 	return histories[0], nil
 }
 
+func (rh *configFileReleaseHistoryStore) CleanConfigFileReleaseHistory(endTime time.Time, limit uint64) error {
+
+	fields := []string{FileHistoryFieldCreateTime, FileHistoryFieldId}
+	needDel := make([]string, 0, limit)
+
+	_, err := rh.handler.LoadValuesByFilter(tblConfigFileReleaseHistory, fields,
+		&model.ConfigFileReleaseHistory{}, func(m map[string]interface{}) bool {
+			saveCreateBy, _ := m[FileHistoryFieldCreateTime].(time.Time)
+			saveId := m[FileHistoryFieldId].(uint64)
+
+			if endTime.After(saveCreateBy) {
+				needDel = append(needDel, strconv.FormatUint(saveId, 10))
+			}
+			return false
+		})
+	if err != nil {
+		return err
+	}
+
+	return rh.handler.DeleteValues(tblConfigFileReleaseHistory, needDel)
+}
+
 // doConfigFileGroupPage 进行分页
 func doConfigFileHistoryPage(ret map[string]interface{}, offset, limit uint32) []*model.ConfigFileReleaseHistory {
-
-	histories := make([]*model.ConfigFileReleaseHistory, 0, len(ret))
-
-	beginIndex := offset
-	endIndex := beginIndex + limit
-	totalCount := uint32(len(ret))
+	var (
+		histories  = make([]*model.ConfigFileReleaseHistory, 0, len(ret))
+		beginIndex = offset
+		endIndex   = beginIndex + limit
+		totalCount = uint32(len(ret))
+	)
 
 	if totalCount == 0 {
 		return histories
@@ -208,5 +220,4 @@ func doConfigFileHistoryPage(ret map[string]interface{}, offset, limit uint32) [
 	})
 
 	return histories[beginIndex:endIndex]
-
 }

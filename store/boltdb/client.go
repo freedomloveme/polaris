@@ -21,12 +21,14 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/boltdb/bolt"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
-	commontime "github.com/polarismesh/polaris-server/common/time"
-	"github.com/polarismesh/polaris-server/common/utils"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/polarismesh/polaris/common/model"
+	commontime "github.com/polarismesh/polaris/common/time"
+	"github.com/polarismesh/polaris/common/utils"
 )
 
 const (
@@ -86,7 +88,6 @@ func (cs *clientStore) BatchAddClients(clients []*model.Client) error {
 func (cs *clientStore) BatchDeleteClients(ids []string) error {
 	err := cs.handler.Execute(true, func(tx *bolt.Tx) error {
 		for i := range ids {
-
 			properties := make(map[string]interface{})
 			properties[ClientFieldValid] = false
 			properties[ClientFieldMtime] = time.Now()
@@ -105,15 +106,17 @@ func (cs *clientStore) BatchDeleteClients(ids []string) error {
 
 // GetMoreClients 根据mtime获取增量clients，返回所有store的变更信息
 func (cs *clientStore) GetMoreClients(mtime time.Time, firstUpdate bool) (map[string]*model.Client, error) {
-
-	fields := []string{ClientFieldMtime}
-
+	fields := []string{ClientFieldMtime, ClientFieldValid}
+	if firstUpdate {
+		mtime = time.Time{}
+	}
 	ret, err := cs.handler.LoadValuesByFilter(tblClient, fields, &clientObject{}, func(m map[string]interface{}) bool {
 		if firstUpdate {
-			return true
+			// 首次更新，那么就只看 valid 状态
+			valid, _ := m[ClientFieldValid].(bool)
+			return valid
 		}
-
-		return m[ClientFieldMtime].(time.Time).After(mtime)
+		return !m[ClientFieldMtime].(time.Time).Before(mtime)
 	})
 
 	if err != nil {
@@ -122,7 +125,6 @@ func (cs *clientStore) GetMoreClients(mtime time.Time, firstUpdate bool) (map[st
 	}
 
 	clients := make(map[string]*model.Client, len(ret))
-
 	for k, v := range ret {
 		client, err := convertToModelClient(v.(*clientObject))
 		if err != nil {
@@ -142,19 +144,17 @@ func convertToClientObject(client *model.Client) (*clientObject, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	tn := time.Now()
-
 	return &clientObject{
-		Host:    client.Proto().Host.Value,
-		Type:    client.Proto().Type.String(),
-		Version: client.Proto().Version.Value,
+		Host:    client.Proto().GetHost().GetValue(),
+		Type:    client.Proto().GetType().String(),
+		Version: client.Proto().GetVersion().GetValue(),
 		Location: map[string]string{
 			"region": client.Proto().GetLocation().GetRegion().GetValue(),
 			"zone":   client.Proto().GetLocation().GetZone().GetValue(),
 			"campus": client.Proto().GetLocation().GetCampus().GetValue(),
 		},
-		Id:         client.Proto().Id.Value,
+		Id:         client.Proto().GetId().GetValue(),
 		Ctime:      tn,
 		Mtime:      tn,
 		StatArrStr: string(data),
@@ -163,20 +163,20 @@ func convertToClientObject(client *model.Client) (*clientObject, error) {
 }
 
 func convertToModelClient(client *clientObject) (*model.Client, error) {
-	stat := make([]*api.StatInfo, 0, 4)
+	stat := make([]*apiservice.StatInfo, 0, 4)
 	err := json.Unmarshal([]byte(client.StatArrStr), &stat)
 	if err != nil {
 		return nil, err
 	}
 
-	c := &api.Client{
+	c := &apiservice.Client{
 		Id:      utils.NewStringValue(client.Id),
 		Host:    utils.NewStringValue(client.Host),
-		Type:    api.Client_ClientType(api.Client_ClientType_value[client.Type]),
+		Type:    apiservice.Client_ClientType(apiservice.Client_ClientType_value[client.Type]),
 		Version: utils.NewStringValue(client.Version),
 		Ctime:   utils.NewStringValue(commontime.Time2String(client.Ctime)),
 		Mtime:   utils.NewStringValue(commontime.Time2String(client.Mtime)),
-		Location: &api.Location{
+		Location: &apimodel.Location{
 			Region: utils.NewStringValue(client.Location["region"]),
 			Zone:   utils.NewStringValue(client.Location["zone"]),
 			Campus: utils.NewStringValue(client.Location["campus"]),

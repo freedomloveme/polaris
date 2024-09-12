@@ -19,20 +19,15 @@ package service
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
+	"fmt"
 	"sync"
 
-	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/polarismesh/polaris-server/auth"
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/namespace"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/service/batch"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/common/eventhub"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/plugin"
 )
 
 const (
@@ -53,24 +48,38 @@ const (
 	DefaultTLL = 5
 )
 
+type ServerProxyFactory func(pre DiscoverServer) (DiscoverServer, error)
+
 var (
 	server       DiscoverServer
 	namingServer *Server = new(Server)
 	once                 = sync.Once{}
 	finishInit           = false
+	// serverProxyFactories Service Server API 代理工厂
+	serverProxyFactories = map[string]ServerProxyFactory{}
 )
+
+func RegisterServerProxy(name string, factor ServerProxyFactory) error {
+	if _, ok := serverProxyFactories[name]; ok {
+		return fmt.Errorf("duplicate ServerProxyFactory, name(%s)", name)
+	}
+	serverProxyFactories[name] = factor
+	return nil
+}
 
 // Config 核心逻辑层配置
 type Config struct {
-	Auth  map[string]interface{} `yaml:"auth"`
-	Batch map[string]interface{} `yaml:"batch"`
+	L5Open       *bool                  `yaml:"l5Open"`
+	AutoCreate   *bool                  `yaml:"autoCreate"`
+	Batch        map[string]interface{} `yaml:"batch"`
+	Interceptors []string               `yaml:"-"`
 }
 
 // Initialize 初始化
-func Initialize(ctx context.Context, namingOpt *Config, cacheOpt *cache.Config, bc *batch.Controller) error {
+func Initialize(ctx context.Context, namingOpt *Config, opts ...InitOption) error {
 	var err error
 	once.Do(func() {
-		err = initialize(ctx, namingOpt, cacheOpt, bc)
+		namingServer, server, err = InitServer(ctx, namingOpt, opts...)
 	})
 
 	if err != nil {
@@ -100,110 +109,86 @@ func GetOriginServer() (*Server, error) {
 }
 
 // 内部初始化函数
-func initialize(ctx context.Context, namingOpt *Config, cacheOpt *cache.Config, bc *batch.Controller) error {
-
-	// 获取存储层对象
-	s, err := store.GetStore()
-	if err != nil {
-		log.Errorf("[Naming][Server] can not get store, err: %s", err.Error())
-		return errors.New("can not get store")
-	}
-	if s == nil {
-		log.Errorf("[Naming][Server] store is null")
-		return errors.New("store is null")
-	}
-
-	healthServer, err := healthcheck.GetServer()
-	if err != nil {
-		log.Errorf("[Naming][Server] can not get store, err: %s", err.Error())
-		return errors.New("can not get healthcheck server")
-	}
-
-	namingServer.healthServer = healthServer
-
-	namingServer.storage = s
-
-	// 注入命名空间管理模块
-	namespaceSvr, err := namespace.GetOriginServer()
-	if err != nil {
-		return err
-	}
-	namingServer.namespaceSvr = namespaceSvr
-
-	// cache模块，可以不开启
-	// 对于控制台集群，只访问控制台接口的，可以不开启cache
-	if cacheOpt.Open {
-		caches, cacheErr := cache.GetCacheManager()
-		if cacheErr != nil {
-			log.Errorf("[Naming][Server] new naming cache err: %s", cacheErr.Error())
-			return cacheErr
-		}
-		log.Infof("[Naming][Server] cache is open, can access the client api function")
-		namingServer.caches = caches
-	}
-
-	namingServer.bc = bc
-
+func InitServer(ctx context.Context, namingOpt *Config, opts ...InitOption) (*Server, DiscoverServer, error) {
+	actualSvr := new(Server)
 	// l5service
-	namingServer.l5service = &l5service{}
+	actualSvr.config = *namingOpt
+	actualSvr.l5service = &l5service{}
+	actualSvr.instanceChains = make([]InstanceChain, 0, 4)
+	actualSvr.createServiceSingle = &singleflight.Group{}
+	actualSvr.subCtxs = make([]*eventhub.SubscribtionContext, 0, 4)
 
-	namingServer.createServiceSingle = &singleflight.Group{}
-	namingServer.createNamespaceSingle = &singleflight.Group{}
+	for i := range opts {
+		opts[i](actualSvr)
+	}
 
 	// 插件初始化
-	pluginInitialize()
+	actualSvr.pluginInitialize()
 
-	authServer, err := auth.GetAuthServer()
-	if err != nil {
-		return err
+	var proxySvr DiscoverServer
+	proxySvr = actualSvr
+	// 需要返回包装代理的 DiscoverServer
+	order := namingOpt.Interceptors
+	for i := range order {
+		factory, exist := serverProxyFactories[order[i]]
+		if !exist {
+			return nil, nil, fmt.Errorf("name(%s) not exist in serverProxyFactories", order[i])
+		}
+
+		afterSvr, err := factory(proxySvr)
+		if err != nil {
+			return nil, nil, err
+		}
+		proxySvr = afterSvr
 	}
+	return actualSvr, proxySvr, nil
+}
 
-	server = newServerAuthAbility(namingServer, authServer)
+type PluginInstanceEventHandler struct {
+	*BaseInstanceEventHandler
+	subscriber plugin.DiscoverChannel
+}
 
+func (p *PluginInstanceEventHandler) OnEvent(ctx context.Context, any2 any) error {
+	e := any2.(model.InstanceEvent)
+	p.subscriber.PublishEvent(e)
 	return nil
 }
 
 // 插件初始化
-func pluginInitialize() {
+func (svr *Server) pluginInitialize() {
 	// 获取CMDB插件
-	namingServer.cmdb = plugin.GetCMDB()
-	if namingServer.cmdb == nil {
+	svr.cmdb = plugin.GetCMDB()
+	if svr.cmdb == nil {
 		log.Warnf("Not Found CMDB Plugin")
 	}
 
 	// 获取History插件，注意：插件的配置在bootstrap已经设置好
-	namingServer.history = plugin.GetHistory()
-	if namingServer.history == nil {
+	svr.history = plugin.GetHistory()
+	if svr.history == nil {
 		log.Warnf("Not Found History Log Plugin")
 	}
 
-	// 获取限流插件
-	namingServer.ratelimit = plugin.GetRatelimit()
-	if namingServer.ratelimit == nil {
-		log.Warnf("Not found Ratelimit Plugin")
-	}
-
-	// 获取DiscoverStatis插件
-	namingServer.discoverStatis = plugin.GetDiscoverStatis()
-	if namingServer.discoverStatis == nil {
-		log.Warnf("Not Found Discover Statis Plugin")
-	}
-
-	// 获取服务事件插件
-	namingServer.discoverEvent = plugin.GetDiscoverEvent()
-	if namingServer.discoverEvent == nil {
+	subscriber := plugin.GetDiscoverEvent()
+	if subscriber == nil {
 		log.Warnf("Not found DiscoverEvent Plugin")
+		return
 	}
 
-	// 获取鉴权插件
-	namingServer.auth = plugin.GetAuth()
-	if namingServer.auth == nil {
-		log.Warnf("Not found Auth Plugin")
+	eventHandler := &PluginInstanceEventHandler{
+		BaseInstanceEventHandler: NewBaseInstanceEventHandler(svr),
+		subscriber:               subscriber,
 	}
+	subCtx, err := eventhub.Subscribe(eventhub.InstanceEventTopic, eventHandler)
+	if err != nil {
+		log.Warnf("register DiscoverEvent into eventhub:%s %v", subscriber.Name(), err)
+	}
+	svr.subCtxs = append(svr.subCtxs, subCtx)
 }
 
-// NewUUID 返回一个随机的UUID
-func NewUUID() string {
-	uuidBytes := uuid.New()
-	return hex.EncodeToString(uuidBytes[:])
+func GetChainOrder() []string {
+	return []string{
+		"auth",
+		"paramcheck",
+	}
 }

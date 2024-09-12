@@ -17,7 +17,19 @@
 
 package grpcserver
 
+import (
+	commonlog "github.com/polarismesh/polaris/common/log"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+)
+
 type InitOption func(svr *BaseGrpcServer)
+
+// WithModule set bz module
+func WithModule(bz authcommon.BzModule) InitOption {
+	return func(svr *BaseGrpcServer) {
+		svr.bz = bz
+	}
+}
 
 // WithProtocol
 func WithProtocol(protocol string) InitOption {
@@ -37,5 +49,12 @@ func WithProtobufCache(cache Cache) InitOption {
 func WithMessageToCacheObject(convert MessageToCache) InitOption {
 	return func(svr *BaseGrpcServer) {
 		svr.convert = convert
+	}
+}
+
+// WithLogger
+func WithLogger(log *commonlog.Scope) InitOption {
+	return func(svr *BaseGrpcServer) {
+		svr.log = log
 	}
 }

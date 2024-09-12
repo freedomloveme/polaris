@@ -18,8 +18,7 @@
 package token
 
 import (
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/plugin"
+	"github.com/polarismesh/polaris/plugin"
 )
 
 // initialize 插件初始化函数
@@ -28,6 +27,22 @@ func (tb *tokenBucket) initialize(c *plugin.ConfigEntry) error {
 	if err != nil {
 		log.Errorf("[Plugin][%s] initialize err: %s", PluginName, err.Error())
 		return err
+	}
+	if !config.Enable {
+		tb.config = config
+		return nil
+	}
+	// 加载本地配置
+	if config.RuleFile != "" {
+		config, err = loadLocalConfig(config.RuleFile)
+		if err != nil {
+			log.Errorf("[Plugin][%s] load local rule fail err: %s", PluginName, err.Error())
+			return err
+		}
+	}
+	// 注册一个配置中心的 Change Event
+	if config.RemoteConf {
+		// TODO 监听规则
 	}
 
 	tb.config = config

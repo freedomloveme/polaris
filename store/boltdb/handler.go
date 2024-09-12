@@ -23,10 +23,10 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/golang/protobuf/proto"
+	bolt "go.etcd.io/bbolt"
 
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/store"
 )
 
 const (
@@ -49,7 +49,7 @@ type BoltHandler interface {
 	SaveValue(typ string, key string, object interface{}) error
 
 	// DeleteValues delete data object by unique key
-	DeleteValues(typ string, key []string, logicDelete bool) error
+	DeleteValues(typ string, key []string) error
 
 	// UpdateValue update properties of data object
 	UpdateValue(typ string, key string, properties map[string]interface{}) error
@@ -131,11 +131,12 @@ func (b *boltHandler) SaveValue(typ string, key string, value interface{}) error
 }
 
 // saveValue Save data to boltdb, need to display incoming transactions
-//  @param tx bolt.Tx
-//  @param typ table name
-//  @param key uniq key
-//  @param value record value
-//  @return error if save failed, return error
+//
+//	@param tx bolt.Tx
+//	@param typ table name
+//	@param key uniq key
+//	@param value record value
+//	@return error if save failed, return error
 func saveValue(tx *bolt.Tx, typ string, key string, value interface{}) error {
 	var typBucket *bolt.Bucket
 	var err error
@@ -169,7 +170,7 @@ func saveValue(tx *bolt.Tx, typ string, key string, value interface{}) error {
 				return err
 			}
 		}
-		bucket.Put([]byte(toBucketField(DataValidFieldName)), encodeBoolBuffer(true))
+		_ = bucket.Put([]byte(toBucketField(DataValidFieldName)), encodeBoolBuffer(true))
 	}
 	return err
 }
@@ -387,16 +388,16 @@ func (b *boltHandler) Close() error {
 }
 
 // DeleteValues delete data object by unique key
-func (b *boltHandler) DeleteValues(typ string, keys []string, logicDelete bool) error {
+func (b *boltHandler) DeleteValues(typ string, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
 	return b.db.Update(func(tx *bolt.Tx) error {
-		return deleteValues(tx, typ, keys, logicDelete)
+		return deleteValues(tx, typ, keys)
 	})
 }
 
-func deleteValues(tx *bolt.Tx, typ string, keys []string, logicDelete bool) error {
+func deleteValues(tx *bolt.Tx, typ string, keys []string) error {
 	typeBucket := tx.Bucket([]byte(typ))
 	if typeBucket == nil {
 		return nil
@@ -404,14 +405,8 @@ func deleteValues(tx *bolt.Tx, typ string, keys []string, logicDelete bool) erro
 	for _, key := range keys {
 		keyBytes := []byte(key)
 		if subBucket := typeBucket.Bucket(keyBytes); subBucket != nil {
-			if logicDelete {
-				if err := subBucket.Put([]byte(toBucketField(DataValidFieldName)), encodeBoolBuffer(false)); err != nil {
-					return err
-				}
-			} else {
-				if err := typeBucket.DeleteBucket(keyBytes); err != nil {
-					return err
-				}
+			if err := typeBucket.DeleteBucket(keyBytes); err != nil {
+				return err
 			}
 		}
 	}
@@ -471,32 +466,39 @@ func getKeys(bucket *bolt.Bucket) ([]string, error) {
 func (b *boltHandler) CountValues(typ string) (int, error) {
 	var count int
 	err := b.db.View(func(tx *bolt.Tx) error {
-		typeBucket := tx.Bucket([]byte(typ))
-		if typeBucket == nil {
-			return nil
-		}
-		return typeBucket.ForEach(func(k, v []byte) error {
-			subBucket := typeBucket.Bucket(k)
-			canCount := true
+		ret, err := countValues(tx, typ)
+		count = ret
+		return err
+	})
+	return count, err
+}
 
-			if subBucket != nil {
-				data := subBucket.Get([]byte(DataValidFieldName))
-				if len(data) == 0 {
-					canCount = true
-				} else {
-					val, err := decodeBoolBuffer(DataValidFieldName, data)
-					if err != nil {
-						return err
-					}
-					canCount = val
+func countValues(tx *bolt.Tx, typ string) (int, error) {
+	var count int
+	typeBucket := tx.Bucket([]byte(typ))
+	if typeBucket == nil {
+		return 0, nil
+	}
+	err := typeBucket.ForEach(func(k, v []byte) error {
+		subBucket := typeBucket.Bucket(k)
+		canCount := true
+
+		if subBucket != nil {
+			data := subBucket.Get([]byte(toBucketField(DataValidFieldName)))
+			if len(data) == 0 {
+				canCount = true
+			} else {
+				val, err := decodeBoolBuffer(DataValidFieldName, data)
+				if err != nil {
+					return err
 				}
+				canCount = val
 			}
-			if canCount {
-				count++
-			}
-
-			return nil
-		})
+		}
+		if canCount {
+			count++
+		}
+		return nil
 	})
 	return count, err
 }

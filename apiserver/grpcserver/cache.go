@@ -22,9 +22,10 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/polarismesh/polaris-server/plugin"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
+
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/plugin"
 )
 
 const (
@@ -40,17 +41,18 @@ type Cache interface {
 	// Get
 	Get(cacheType string, key string) *CacheObject
 	// Put
-	Put(v *CacheObject) *CacheObject
+	Put(v *CacheObject) (*CacheObject, bool)
 }
 
 // CacheObject
 type CacheObject struct {
+	// OriginVal
 	OriginVal proto.Message
-
+	// preparedVal
 	preparedVal *grpc.PreparedMsg
-
+	// CacheType
 	CacheType string
-
+	// Key
 	Key string
 }
 
@@ -61,7 +63,6 @@ func (c *CacheObject) GetPreparedMessage() *grpc.PreparedMsg {
 func (c *CacheObject) PrepareMessage(stream grpc.ServerStream) error {
 	pmsg := &grpc.PreparedMsg{}
 	if err := pmsg.Encode(stream, c.OriginVal); err != nil {
-		log.Error("[Grpc][ProtoCache] prepare message", zap.String("key", c.Key), zap.Error(err))
 		return err
 	}
 	c.preparedVal = pmsg
@@ -71,7 +72,7 @@ func (c *CacheObject) PrepareMessage(stream grpc.ServerStream) error {
 // protobufCache PB object cache, reduce the overhead caused by the serialization of the PB repeated object
 type protobufCache struct {
 	enabled       bool
-	cahceRegistry map[string]*lru.ARCCache
+	cacheRegistry map[string]*lru.ARCCache
 }
 
 // NewCache Component a PB cache pool
@@ -87,32 +88,36 @@ func NewCache(options map[string]interface{}, cacheType []string) (Cache, error)
 		size = 128
 	}
 
-	cahceRegistry := make(map[string]*lru.ARCCache)
+	cacheRegistry := make(map[string]*lru.ARCCache)
 
 	for i := range cacheType {
 		cache, err := lru.NewARC(size)
 		if err != nil {
 			return nil, fmt.Errorf("init protobuf=[%s] cache fail : %+v", cacheType[i], err)
 		}
-		cahceRegistry[cacheType[i]] = cache
+		cacheRegistry[cacheType[i]] = cache
 	}
 
 	return &protobufCache{
 		enabled:       enabled,
-		cahceRegistry: cahceRegistry,
+		cacheRegistry: cacheRegistry,
 	}, nil
 }
 
-// Get get value by cacheType and key
+// Get value by cacheType and key
 func (pc *protobufCache) Get(cacheType string, key string) *CacheObject {
-	c, ok := pc.cahceRegistry[cacheType]
+	c, ok := pc.cacheRegistry[cacheType]
 	if !ok {
 		return nil
 	}
 
 	val, exist := c.Get(key)
-
-	plugin.GetStatis().AddCacheCall(plugin.ComponentProtobufCache, cacheType, exist, 1)
+	plugin.GetStatis().ReportCallMetrics(metrics.CallMetric{
+		Type:     metrics.ProtobufCacheCallMetric,
+		Protocol: cacheType,
+		Success:  exist,
+		Times:    1,
+	})
 
 	if val == nil {
 		return nil
@@ -122,20 +127,19 @@ func (pc *protobufCache) Get(cacheType string, key string) *CacheObject {
 }
 
 // Put save cache value
-func (pc *protobufCache) Put(v *CacheObject) *CacheObject {
+func (pc *protobufCache) Put(v *CacheObject) (*CacheObject, bool) {
 	if v == nil {
-		return nil
+		return nil, false
 	}
 
 	cacheType := v.CacheType
 	key := v.Key
 
-	c, ok := pc.cahceRegistry[cacheType]
+	c, ok := pc.cacheRegistry[cacheType]
 	if !ok {
-		log.Warn("[Grpc][ProtoCache] put cache ignore", zap.String("cacheType", cacheType))
-		return nil
+		return nil, false
 	}
 
 	c.Add(key, v)
-	return v
+	return v, true
 }

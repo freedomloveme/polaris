@@ -24,18 +24,22 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/smartystreets/goconvey/convey"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	"github.com/stretchr/testify/assert"
 
-	amock "github.com/polarismesh/polaris-server/auth/mock"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/common/utils"
-	smock "github.com/polarismesh/polaris-server/store/mock"
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/common/utils"
+	smock "github.com/polarismesh/polaris/store/mock"
 )
+
+func init() {
+	metrics.InitMetrics()
+}
 
 // TestNewBatchCtrlWithConfig 测试New
 func TestNewBatchCtrlWithConfig(t *testing.T) {
-	Convey("正常新建", t, func() {
+	t.Run("正常新建", func(t *testing.T) {
 		ctrlConfig := &CtrlConfig{
 			Open:          true,
 			QueueSize:     1024,
@@ -48,34 +52,31 @@ func TestNewBatchCtrlWithConfig(t *testing.T) {
 			Deregister: ctrlConfig,
 		}
 		bc, err := NewBatchCtrlWithConfig(nil, nil, config)
-		So(err, ShouldBeNil)
-		So(bc, ShouldNotBeNil)
-		So(bc.register, ShouldNotBeNil)
-		So(bc.deregister, ShouldNotBeNil)
+		assert.Nil(t, err)
+		assert.NotNil(t, bc)
+		assert.NotNil(t, bc.register)
+		assert.NotNil(t, bc.deregister)
 	})
-	Convey("可以关闭register和deregister的batch操作", t, func() {
+	t.Run("可以关闭register和deregister的batch操作", func(t *testing.T) {
 		bc, err := NewBatchCtrlWithConfig(nil, nil, nil)
-		So(err, ShouldBeNil)
-		So(bc, ShouldBeNil)
+		assert.Nil(t, err)
+		assert.Nil(t, bc)
 
 		config := &Config{
 			Register:   &CtrlConfig{Open: false},
 			Deregister: &CtrlConfig{Open: false},
 		}
 		bc, err = NewBatchCtrlWithConfig(nil, nil, config)
-		So(err, ShouldBeNil)
-		So(bc, ShouldNotBeNil)
-		So(bc.register, ShouldBeNil)
-		So(bc.deregister, ShouldBeNil)
+		assert.Nil(t, err)
+		assert.NotNil(t, bc)
+		assert.Nil(t, bc.register)
+		assert.Nil(t, bc.deregister)
 	})
 }
 
-func newCreateInstanceController(t *testing.T) (*Controller, *smock.MockStore, *amock.MockAuthority,
-	context.CancelFunc) {
+func newCreateInstanceController(t *testing.T) (*gomock.Controller, *Controller, *smock.MockStore, context.CancelFunc) {
 	ctl := gomock.NewController(t)
 	storage := smock.NewMockStore(ctl)
-	authority := amock.NewMockAuthority(ctl)
-	defer ctl.Finish()
 	config := &Config{
 		Register: &CtrlConfig{
 			Open:          true,
@@ -91,18 +92,17 @@ func newCreateInstanceController(t *testing.T) (*Controller, *smock.MockStore, *
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	bc.Start(ctx)
-	return bc, storage, authority, cancel
-	// defer cancel()
+	return ctl, bc, storage, cancel
 }
 
-func sendAsyncCreateInstance(bc *Controller) error {
+func sendAsyncCreateInstance(bc *Controller, cnt int32) error {
 	var wg sync.WaitGroup
-	ch := make(chan error, 100)
-	for i := 0; i < 100; i++ {
+	ch := make(chan error, cnt)
+	for i := int32(0); i < cnt; i++ {
 		wg.Add(1)
-		go func(index int) {
+		go func(index int32) {
 			defer wg.Done()
-			future := bc.AsyncCreateInstance(utils.NewUUID(), &api.Instance{
+			future := bc.AsyncCreateInstance(utils.NewUUID(), &apiservice.Instance{
 				Id:           utils.NewStringValue(fmt.Sprintf("%d", index)),
 				ServiceToken: utils.NewStringValue(fmt.Sprintf("%d", index)),
 			}, true)
@@ -126,27 +126,41 @@ func sendAsyncCreateInstance(bc *Controller) error {
 
 // TestAsyncCreateInstance test AsyncCreateInstance
 func TestAsyncCreateInstance(t *testing.T) {
-	Convey("正常创建实例", t, func() {
-		bc, storage, authority, cancel := newCreateInstanceController(t)
-		defer cancel()
+	t.Run("正常创建实例", func(t *testing.T) {
+		ctrl, bc, storage, cancel := newCreateInstanceController(t)
+		t.Cleanup(func() {
+			ctrl.Finish()
+			cancel()
+		})
+		mockSvc := &model.Service{ID: "1"}
+		totalIns := int32(100)
 		storage.EXPECT().BatchGetInstanceIsolate(gomock.Any()).Return(nil, nil).AnyTimes()
 		storage.EXPECT().GetSourceServiceToken(gomock.Any(), gomock.Any()).
-			Return(&model.Service{ID: "1"}, nil).AnyTimes()
-		authority.EXPECT().VerifyInstance(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+			Return(mockSvc, nil).AnyTimes()
+		storage.EXPECT().GetServiceByID(gomock.Any()).Return(mockSvc, nil).AnyTimes()
 		storage.EXPECT().BatchAddInstances(gomock.Any()).Return(nil).AnyTimes()
-		So(sendAsyncCreateInstance(bc), ShouldBeNil)
+		assert.NoError(t, sendAsyncCreateInstance(bc, totalIns))
 	})
 }
 
 // TestSendReply 测试reply
 func TestSendReply(t *testing.T) {
-	Convey("可以正常获取类型", t, func() {
+	t.Run("可以正常获取类型", func(t *testing.T) {
 		sendReply(make([]*InstanceFuture, 0, 10), 1, nil)
 	})
-	Convey("可以正常获取类型2", t, func() {
+	t.Run("可以正常获取类型2", func(t *testing.T) {
 		sendReply(make(map[string]*InstanceFuture, 10), 1, nil)
 	})
-	Convey("其他类型不通过", t, func() {
+	t.Run("其他类型不通过", func(t *testing.T) {
 		sendReply("test string", 1, nil)
+	})
+	t.Run("可以正常获取类型", func(t *testing.T) {
+		SendClientReply(make([]*ClientFuture, 0, 10), 1, nil)
+	})
+	t.Run("可以正常获取类型2", func(t *testing.T) {
+		SendClientReply(make(map[string]*ClientFuture, 10), 1, nil)
+	})
+	t.Run("其他类型不通过", func(t *testing.T) {
+		SendClientReply("test string", 1, nil)
 	})
 }

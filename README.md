@@ -1,173 +1,97 @@
 # Polaris: Service Discovery and Governance
 
-[![Build Status](https://github.com/polarismesh/polaris/actions/workflows/testing.yml/badge.svg)](https://github.com/PolarisMesh/polaris/actions/workflows/testing.yml)
+[![Build Status](https://github.com/polarismesh/polaris/actions/workflows/codecov.yaml/badge.svg)](https://github.com/PolarisMesh/polaris/actions/workflows/codecov.yaml)
 [![codecov.io](https://codecov.io/gh/polarismesh/polaris/branch/main/graph/badge.svg)](https://codecov.io/gh/polarismesh/polaris?branch=main)
+[![Go Report Card](https://goreportcard.com/badge/github.com/polarismesh/polaris)](https://goreportcard.com/report/github.com/polarismesh/polaris)
+[![Docker Pulls](https://img.shields.io/docker/pulls/polarismesh/polaris-server)](https://hub.docker.com/repository/docker/polarismesh/polaris-server/general)
 [![Contributors](https://img.shields.io/github/contributors/polarismesh/polaris)](https://github.com/polarismesh/polaris/graphs/contributors)
 [![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/polarismesh/polaris?style=flat-square)](https://github.com/polarismesh/polaris)
 
 <img src="logo.svg" width="10%" height="10%" />
 
 English | [简体中文](./README-zh.md)
 
----
-
 README：
 
-- [Introduction](#introduction)
-- [Components](#components)
-- [Getting started](#getting-started)
-- [Chat group](#chat-group)
-- [Contribution](#contribution)
+- [Polaris: Service Discovery and Governance](#polaris-service-discovery-and-governance)
+  - [Introduction](#introduction)
+  - [How to install](#how-to-install)
+  - [How to develop service](#how-to-develop-service)
+  - [How to integrate service gateway](#how-to-integrate-service-gateway)
+  - [Chat group](#chat-group)
 
-Principle or user manual can visit [website](https://polarismesh.cn/) to learn more
+Visit [Website](https://polarismesh.cn/) to learn more
 
 ## Introduction
 
-<img src="https://raw.githubusercontent.com/polarismesh/website/main/docs/en/doc/What%20is%20Polaris/Picture/Overview/first-image.png" width="800" />
+Polaris is an open source system for service discovery and governance. It can be used to solve the problem of service management, traffic control, fault tolerance and config management in distributed and microservice architecture.
 
-Polaris is a cloud-native service discovery and governance center. It can be used to solve the problem of service
-connection, fault tolerance, traffic control and secure in distributed and microservice architecture.
+<img src="https://raw.githubusercontent.com/polarismesh/website/main/content/en/docs/What%20is%20Polaris/Picture/function.png" width="80%" />
 
-Functions:
+**Functions**:
 
-- basic: service discover, service register and health check
-- fault tolerance: circuit break and rate limit
-- traffic control: request route and load balance
-- secure: authenticate
+- service management: service discovery, service registry and health check 
+- traffic control: customizable routing, load balance, rate limiting and access control
+- fault tolerance: circuit breaker for service, interface and instance
+- config management: config version control, grayscale release and dynamic update
 
-Features:
+**Features**:
 
-- It provides SDK for high-performance business scenario and sidecar for non-invasive development mode.
-- It provides multiple clients for different development languages, such as Java, Go, C++ and Nodejs.
-- It can integrate with different service frameworks and gateways, such as Spring Cloud, gRPC and Nginx.
-- It is compatible with Kubernetes and supports automatic injection of K8s service and Polaris sidecar.
+- It is a one-stop solution instead of registry center, service mesh and config center.
+- It provides multi-mode data plane, including SDK, development framework, Java agent and sidecar.
+- It is integrated into the most frequently used frameworks, such as Spring Cloud, Dubbo and gRPC.
+- It supports K8s service registry and automatic injection of sidecar for proxy service mesh.
 
-## Components
+## How to install 
 
-server:
+Visit [Installation Guide](https://github.com/polarismesh/polaris/tree/main/release) to learn more
 
-- [polaris](https://github.com/PolarisMesh/polaris): Control Plane
-- [polaris-console](https://github.com/PolarisMesh/polaris-console): Console
+## How to develop service
 
-client:
+Polaris provides multi-mode data plane including SDK, development framework, Java agent and sidecar. You can select one or more mode to develop service according to business requirements. 
 
-- [polaris-java](https://github.com/PolarisMesh/polaris-java): Java Client
-- [polaris-go](https://github.com/PolarisMesh/polaris-go): Go Client
-- [polaris-cpp](https://github.com/PolarisMesh/polaris-cpp): C++ Client
-- [polaris-php](https://github.com/polarismesh/polaris-php): PHP Client
-- [polaris-sidecar](https://github.com/PolarisMesh/polaris-sidecar): Envoy based Sidecar
+Use Polaris multi-language SDK and call Polaris Client API directly:
 
-ecosystem:
+- [Polaris Java](https://github.com/polarismesh/polaris-java)
+- [Polaris Go](https://github.com/polarismesh/polaris-go)
+- [Polaris C/C++](https://github.com/polarismesh/polaris-cpp)
+- [Polaris PHP](https://github.com/polarismesh/polaris-php)
+- [Polaris Lua](https://github.com/polarismesh/polaris-lua)
 
-- [polaris-controller](https://github.com/PolarisMesh/polaris-controller): K8s Controller for Automatic Injection of K8s
-  Service and Polaris Sidecar
-- [spring-cloud-tencent](https://github.com/Tencent/spring-cloud-tencent): spring cloud integrates with polaris-java
-- [grpc-java-polaris](https://github.com/PolarisMesh/grpc-java-polaris): grpc-java integrates with polaris-java
-- [grpc-go-polaris](https://github.com/PolarisMesh/grpc-go-polaris): grpc-go integrates with polaris-go
-- [dubbo3/dubbo-go](https://github.com/polarismesh/examples/tree/main/dubbo3/dubbogo): dubbo-go integrates with
-  polaris-go
-- [nginx-polaris](https://github.com/PolarisMesh/nginx-polaris): nginx integrates with polaris-cpp
+Use HTTP or RPC frameworks already integrating Polaris Java SDK:
 
-others:
+- [spring cloud](https://github.com/Tencent/spring-cloud-tencent)
+- [spring boot](https://github.com/polarismesh/spring-boot-polaris)
+- dubbo-java
+  - [registry and discovery](https://github.com/apache/dubbo-spi-extensions/tree/master/dubbo-registry-extensions)
+  - [routing and load balance](https://github.com/apache/dubbo-spi-extensions/tree/master/dubbo-cluster-extensions)
+  - [circuit breaker and rate limiter](https://github.com/apache/dubbo-spi-extensions/tree/master/dubbo-filter-extensions)
+- [grpc-java](https://github.com/polarismesh/grpc-java-polaris)
 
-- [website](https://github.com/PolarisMesh/website): Source for the polarismesh.cn site
-- [samples](https://github.com/PolarisMesh/samples): Samples for Learning PolarisMesh
+Use HTTP or RPC frameworks already integrating Polaris Go SDK:
 
-## Getting started
+- dubbo-go
+  - [registry and discovery](https://github.com/apache/dubbo-go/tree/main/registry)
+  - [routing](https://github.com/apache/dubbo-go/tree/main/cluster/router)
+  - [circuit breaker and rate limiter](https://github.com/apache/dubbo-go/tree/main/filter)
+  - [examples](https://github.com/apache/dubbo-go-samples/tree/master/polaris)
+- [grpc-go](https://github.com/polarismesh/grpc-go-polaris)
 
-### Preconditions
+Use K8s service and sidecar:
 
-#### Prepare database
+- [Polaris Controller](https://github.com/polarismesh/polaris-controller)
+- [Polaris Sidecar](https://github.com/polarismesh/polaris-sidecar)
 
-Please download and install MySQL, version requirement >=5.7, download available here:
-https://dev.mysql.com/downloads/mysql/5.7.html
+## How to integrate service gateway
 
-#### Import SQL script
+You can integrate service gateways with Polaris service discovery and governance.
 
-Point Script: ./store/sqldb/scripts/polaris_server.sql, one can import through mysql admin or console.
-
-#### Prepare golang compile environment
-
-Polaris server end needs golang compile environment, version number needs >=1.17, download available
-here: https://golang.org/dl/#featured.
-
-### Build
-
-```shell script
-chmod +x build.sh
-./build.sh
-```
-
-After built, one can see 'polaris-server-release_${version}.tar.gz' package from the list.
-
-### Installation
-
-#### Unzip package
-
-Obtain polaris-server-release_${version}.tar.gz, and unzip.
-
-#### Change polaris configuration
-
-After unzipped, vi polaris-server.yaml, replace DB configuration's variable to real database information
-: ##DB_USER## (database username), ##DB_PWD##（database password）, ##DB_ADDR##（database address）, ##DB_NAME##（database
-name）
-
-#### Execute Installation Script
-
-```shell script
-chmod +x ./tool/*.sh
-# install
-./tool/start.sh
-# test whether the process is successful 
-./tool/p.sh
-```
-
-After all, run ./p.sh, prompt Polaris Server, proof the installation is successful
-
-#### Verify installation
-
-```shell script
-curl http://127.0.0.1:8090
-```
-
-Return text is 'Polaris Server', proof features run smoothly
-
-## How to access
-
-Polaris supports microservices built with multi-language, multi-framework, multi-mode (proxyless / proxy)  to access。
-
-(1) multi-language access guide：
-
-- [Java QuickStart Example](https://github.com/polarismesh/polaris-java/tree/main/polaris-examples/quickstart-example)
-- [Go QuickStart Example](https://github.com/polarismesh/polaris-go/tree/main/examples/quickstart)
-- [C++ QuickStart Example](https://github.com/polarismesh/polaris-cpp/tree/main/examples/quickstart)
-
-(2) multi-framework access guide:
-
-- [Spring Cloud Examples](https://github.com/Tencent/spring-cloud-tencent/tree/main/spring-cloud-tencent-examples)
-- [Spring Boot QuickStart Example](https://github.com/polarismesh/spring-boot-polaris/tree/main/spring-boot-polaris-examples/quickstart-example)
-- [gRPC-Go QuickStart Example](https://github.com/polarismesh/grpc-go-polaris/tree/main/examples/quickstart)
-- [gRPC-Java QuickStart Example](https://github.com/polarismesh/grpc-java-polaris/tree/main/grpc-java-polaris-examples/quickstart-example)
-
-(3) proxy mode access guide：
-
-- [Envoy QuickStart Example](https://github.com/polarismesh/examples/tree/main/servicemesh/extended-bookinfo)
-
-More access guide：[Doc](https://polarismesh.cn/zh/doc/快速入门/使用SDK接入.html#使用-sdk%20接入)
-
-## User manual
-
-Polaris function guide can refer：[Manual](https://polarismesh.cn/zh/doc/使用指南/基本原理.html#基本原理)
+- [spring cloud gateway](https://github.com/Tencent/spring-cloud-tencent)
+- [nginx gateway](https://github.com/polarismesh/nginx-gateway)
 
 ## Chat group
 
 Please scan the QR code to join the chat group.
 
-<img src="https://main.qcloudimg.com/raw/bff4285d70498058caa212805b83a620.jpg" width="30%" height="30%" />
-
-## Contribution
-
-If you have good comments or suggestions, please give us Issues or Pull Requests to contribute to improve the
-development experience of Polaris Mesh.
-
-<br>see details：[CONTRIBUTING.md](./CONTRIBUTING.md)
+<img src="./qrcode.png" width="20%" height="20%" />

@@ -18,13 +18,14 @@
 package boltdb
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/common/utils"
 )
 
 const (
@@ -95,11 +96,11 @@ func (n *namespaceStore) AddNamespace(namespace *model.Namespace) error {
 	namespace.CreateTime = tn
 	namespace.ModifyTime = tn
 	namespace.Valid = true
-	return n.handler.SaveValue(tblNameNamespace, namespace.Name, namespace)
+	return n.handler.SaveValue(tblNameNamespace, namespace.Name, n.toStore(namespace))
 }
 
 func (n *namespaceStore) cleanNamespace(name string) error {
-	if err := n.handler.DeleteValues(tblNameNamespace, []string{name}, false); err != nil {
+	if err := n.handler.DeleteValues(tblNameNamespace, []string{name}); err != nil {
 		log.Errorf("[Store][boltdb] delete invalid namespace error, %+v", err)
 		return err
 	}
@@ -116,6 +117,7 @@ func (n *namespaceStore) UpdateNamespace(namespace *model.Namespace) error {
 	properties["Owner"] = namespace.Owner
 	properties["Comment"] = namespace.Comment
 	properties["ModifyTime"] = time.Now()
+	properties["ServiceExportTo"] = utils.MustJson(namespace.ServiceExportTo)
 	return n.handler.UpdateValue(tblNameNamespace, namespace.Name, properties)
 }
 
@@ -131,28 +133,9 @@ func (n *namespaceStore) UpdateNamespaceToken(name string, token string) error {
 	return n.handler.UpdateValue(tblNameNamespace, name, properties)
 }
 
-// ListNamespaces query all namespaces by owner
-func (n *namespaceStore) ListNamespaces(owner string) ([]*model.Namespace, error) {
-	if owner == "" {
-		return nil, errors.New("store lst namespaces owner is empty")
-	}
-	values, err := n.handler.LoadValuesByFilter(
-		tblNameNamespace, []string{"Owner"}, &model.Namespace{}, func(value map[string]interface{}) bool {
-			ownerValue, ok := value["Owner"]
-			if !ok {
-				return false
-			}
-			return strings.Contains(ownerValue.(string), owner)
-		})
-	if err != nil {
-		return nil, err
-	}
-	return toNamespaces(values), nil
-}
-
 // GetNamespace query namespace by name
 func (n *namespaceStore) GetNamespace(name string) (*model.Namespace, error) {
-	values, err := n.handler.LoadValues(tblNameNamespace, []string{name}, &model.Namespace{})
+	values, err := n.handler.LoadValues(tblNameNamespace, []string{name}, &Namespace{})
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +143,8 @@ func (n *namespaceStore) GetNamespace(name string) (*model.Namespace, error) {
 	if !ok {
 		return nil, nil
 	}
-	ns := nsValue.(*model.Namespace)
-	return ns, nil
+	ns := nsValue.(*Namespace)
+	return n.toModel(ns), nil
 }
 
 type NamespaceSlice []*model.Namespace
@@ -181,14 +164,30 @@ func (ns NamespaceSlice) Swap(i, j int) {
 	ns[i], ns[j] = ns[j], ns[i]
 }
 
+func matchFieldValue(value string, pattern string) bool {
+	if utils.IsWildName(pattern) {
+		return utils.IsWildMatch(value, pattern)
+	}
+	return pattern == value
+}
+
+func matchFieldValueByPatterns(value string, patterns []string) bool {
+	for _, p := range patterns {
+		if matchFieldValue(value, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetNamespaces get namespaces by offset and limit
 func (n *namespaceStore) GetNamespaces(
 	filter map[string][]string, offset, limit int) ([]*model.Namespace, uint32, error) {
-	values, err := n.handler.LoadValuesAll(tblNameNamespace, &model.Namespace{})
+	values, err := n.handler.LoadValuesAll(tblNameNamespace, &Namespace{})
 	if err != nil {
 		return nil, 0, err
 	}
-	namespaces := NamespaceSlice(toNamespaces(values))
+	namespaces := NamespaceSlice(n.toNamespaces(values))
 
 	ret := make([]*model.Namespace, 0)
 	for i := range namespaces {
@@ -196,30 +195,20 @@ func (n *namespaceStore) GetNamespaces(
 		if !ns.Valid {
 			continue
 		}
-		isFind := true
-		for index, value := range filter {
-			compare := func(s string) bool {
-				for _, v := range value {
-					if strings.Contains(s, v) {
-						return true
-					}
-				}
-				return false
-			}
-
+		matched := true
+		for index, patterns := range filter {
 			if index == OwnerAttribute {
-				if isFind = compare(ns.Owner); !isFind {
+				if matched = matchFieldValueByPatterns(ns.Owner, patterns); !matched {
 					break
 				}
-
 			}
 			if index == NameAttribute {
-				if isFind = compare(ns.Name); !isFind {
+				if matched = matchFieldValueByPatterns(ns.Name, patterns); !matched {
 					break
 				}
 			}
 		}
-		if isFind {
+		if matched {
 			ret = append(ret, ns)
 		}
 	}
@@ -228,7 +217,7 @@ func (n *namespaceStore) GetNamespaces(
 	sort.Sort(sort.Reverse(namespaces))
 	startIdx := offset
 	if startIdx >= len(namespaces) {
-		return nil, 0, nil
+		return nil, uint32(len(namespaces)), nil
 	}
 	endIdx := startIdx + limit
 	if endIdx > len(namespaces) {
@@ -238,10 +227,10 @@ func (n *namespaceStore) GetNamespaces(
 	return ret, uint32(len(namespaces)), nil
 }
 
-func toNamespaces(values map[string]interface{}) []*model.Namespace {
+func (n *namespaceStore) toNamespaces(values map[string]interface{}) []*model.Namespace {
 	namespaces := make([]*model.Namespace, 0, len(values))
 	for _, nsValue := range values {
-		namespaces = append(namespaces, nsValue.(*model.Namespace))
+		namespaces = append(namespaces, n.toModel(nsValue.(*Namespace)))
 	}
 	return namespaces
 }
@@ -249,7 +238,7 @@ func toNamespaces(values map[string]interface{}) []*model.Namespace {
 // GetMoreNamespaces get the latest updated namespaces
 func (n *namespaceStore) GetMoreNamespaces(mtime time.Time) ([]*model.Namespace, error) {
 	values, err := n.handler.LoadValuesByFilter(
-		tblNameNamespace, []string{"ModifyTime"}, &model.Namespace{}, func(value map[string]interface{}) bool {
+		tblNameNamespace, []string{"ModifyTime"}, &Namespace{}, func(value map[string]interface{}) bool {
 			mTimeValue, ok := value["ModifyTime"]
 			if !ok {
 				return false
@@ -259,5 +248,50 @@ func (n *namespaceStore) GetMoreNamespaces(mtime time.Time) ([]*model.Namespace,
 	if err != nil {
 		return nil, err
 	}
-	return toNamespaces(values), nil
+	return n.toNamespaces(values), nil
+}
+
+func (n *namespaceStore) toModel(data *Namespace) *model.Namespace {
+	return toModelNamespace(data)
+}
+
+func toModelNamespace(data *Namespace) *model.Namespace {
+	export := make(map[string]struct{})
+	_ = json.Unmarshal([]byte(data.ServiceExportTo), &export)
+	return &model.Namespace{
+		Name:            data.Name,
+		Comment:         data.Comment,
+		Token:           data.Token,
+		Owner:           data.Owner,
+		ServiceExportTo: export,
+		CreateTime:      data.CreateTime,
+		ModifyTime:      data.ModifyTime,
+		Valid:           data.Valid,
+	}
+}
+
+func (n *namespaceStore) toStore(data *model.Namespace) *Namespace {
+	return &Namespace{
+		Name:            data.Name,
+		Comment:         data.Comment,
+		Token:           data.Token,
+		Owner:           data.Owner,
+		ServiceExportTo: utils.MustJson(data.ServiceExportTo),
+		CreateTime:      data.CreateTime,
+		ModifyTime:      data.ModifyTime,
+		Valid:           data.Valid,
+	}
+}
+
+// Namespace 命名空间结构体
+type Namespace struct {
+	Name    string
+	Comment string
+	Token   string
+	Owner   string
+	Valid   bool
+	// ServiceExportTo 服务可见性设置
+	ServiceExportTo string
+	CreateTime      time.Time
+	ModifyTime      time.Time
 }

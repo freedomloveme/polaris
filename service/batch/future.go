@@ -18,40 +18,58 @@
 package batch
 
 import (
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
+	"time"
+
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
+
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/plugin"
 )
 
 // InstanceFuture 创建实例的异步结构体
 type InstanceFuture struct {
+	isRegis bool
+	// 任务开始时间
+	begin time.Time
+	// 服务的id
 	serviceId string
 	// api请求对象
-	request *api.Instance
+	request *apiservice.Instance
 	// 从数据库中读取到的model信息
 	instance *model.Instance
 	// 记录对外API的错误码
-	code uint32
+	code apimodel.Code
 	// 这个 future 是否会被外部调用 Wait 接口
 	needWait bool
 	// 执行成功/失败的应答chan
 	result chan error
 	// 健康与否
 	healthy bool
+	// lastHeartbeatTimeSec 实例最后一次心跳上报时间
+	lastHeartbeatTimeSec int64
 }
 
 // Reply future的应答
-func (future *InstanceFuture) Reply(code uint32, result error) {
+func (future *InstanceFuture) Reply(cur time.Time, code apimodel.Code, result error) {
+	if future.isRegis {
+		reportRegisInstanceCost(future.begin, cur, code)
+	}
+	if code == apimodel.Code_InstanceRegisTimeout {
+		metrics.ReportDropInstanceRegisTask()
+	}
+
 	if !future.needWait {
 		if result != nil {
-			log.Error("[Instance][Regis] receive future result", zap.String("service-id", future.serviceId),
+			log.Error("[Instance][Regis] receive future result", zap.String("instance-id", future.instance.ID()),
 				zap.Error(result))
 		}
 		return
 	}
 
 	future.code = code
-
 	select {
 	case future.result <- result:
 	default:
@@ -77,23 +95,40 @@ func (future *InstanceFuture) Instance() *model.Instance {
 	return future.instance
 }
 
+// CanDrop 该 future 是否可以丢弃
+func (future *InstanceFuture) CanDrop() bool {
+	return !future.needWait
+}
+
 // Code 获取code
-func (future *InstanceFuture) Code() uint32 {
+func (future *InstanceFuture) Code() apimodel.Code {
 	return future.code
 }
 
 // sendReply 批量答复futures
-func sendReply(futures interface{}, code uint32, result error) {
+func sendReply(futures interface{}, code apimodel.Code, result error) {
+	cur := time.Now()
 	switch futureType := futures.(type) {
 	case []*InstanceFuture:
 		for _, entry := range futureType {
-			entry.Reply(code, result)
+			entry.Reply(cur, code, result)
 		}
 	case map[string]*InstanceFuture:
 		for _, entry := range futureType {
-			entry.Reply(code, result)
+			entry.Reply(cur, code, result)
 		}
 	default:
 		log.Errorf("[Controller] not found reply futures type: %T", futures)
 	}
+}
+
+func reportRegisInstanceCost(begin, cur time.Time, code apimodel.Code) {
+	diff := cur.Sub(begin)
+	plugin.GetStatis().ReportCallMetrics(metrics.CallMetric{
+		Type:     metrics.SystemCallMetric,
+		API:      "AsyncRegisInstance",
+		Code:     int(code),
+		Duration: diff,
+	})
+	metrics.ReportInstanceRegisCost(diff)
 }

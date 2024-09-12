@@ -21,15 +21,32 @@ import (
 	"context"
 	"fmt"
 
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
-	"github.com/polarismesh/polaris-server/apiserver"
-	"github.com/polarismesh/polaris-server/apiserver/grpcserver"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/service"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
+	"github.com/polarismesh/polaris/apiserver"
+	"github.com/polarismesh/polaris/apiserver/grpcserver"
+	v1 "github.com/polarismesh/polaris/apiserver/grpcserver/discover/v1"
+	"github.com/polarismesh/polaris/apiserver/grpcserver/utils"
+	commonlog "github.com/polarismesh/polaris/common/log"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/service"
+	"github.com/polarismesh/polaris/service/healthcheck"
+)
+
+var (
+	namingLog = commonlog.GetScopeOrDefaultByName(commonlog.NamingLoggerName)
+
+	cacheTypes = map[string]struct{}{
+		apiservice.DiscoverResponse_INSTANCE.String():        {},
+		apiservice.DiscoverResponse_ROUTING.String():         {},
+		apiservice.DiscoverResponse_RATE_LIMIT.String():      {},
+		apiservice.DiscoverResponse_CIRCUIT_BREAKER.String(): {},
+		apiservice.DiscoverResponse_FAULT_DETECTOR.String():  {},
+		apiservice.DiscoverResponse_SERVICES.String():        {},
+	}
 )
 
 // GRPCServer GRPC API服务器
@@ -38,6 +55,8 @@ type GRPCServer struct {
 	namingServer      service.DiscoverServer
 	healthCheckServer *healthcheck.Server
 	openAPI           map[string]apiserver.APIConfig
+
+	v1server *v1.DiscoverServer
 }
 
 // GetPort 获取端口
@@ -53,10 +72,30 @@ func (g *GRPCServer) GetProtocol() string {
 // Initialize 初始化GRPC API服务器
 func (g *GRPCServer) Initialize(ctx context.Context, option map[string]interface{},
 	apiConf map[string]apiserver.APIConfig) error {
-
 	g.openAPI = apiConf
+	if err := g.BaseGrpcServer.Initialize(ctx, option, g.buildInitOptions(option)...); err != nil {
+		return err
+	}
 
-	return g.BaseGrpcServer.Initialize(ctx, option, g.buildInitOptions(option)...)
+	// 引入功能模块和插件
+	var err error
+	if g.namingServer, err = service.GetServer(); err != nil {
+		namingLog.Errorf("%v", err)
+		return err
+	}
+
+	if g.healthCheckServer, err = healthcheck.GetServer(); err != nil {
+		namingLog.Errorf("%v", err)
+		return err
+	}
+
+	g.v1server = v1.NewDiscoverServer(
+		v1.WithAllowAccess(g.allowAccess),
+		v1.WithEnterRateLimit(g.enterRateLimit),
+		v1.WithHealthCheckerServer(g.healthCheckServer),
+		v1.WithNamingServer(g.namingServer),
+	)
+	return nil
 }
 
 // Run 启动GRPC API服务器
@@ -66,30 +105,21 @@ func (g *GRPCServer) Run(errCh chan error) {
 			switch name {
 			case "client":
 				if config.Enable {
-					api.RegisterPolarisGRPCServer(server, g)
-					openMethod, getErr := apiserver.GetClientOpenMethod(config.Include, g.GetProtocol())
+					// 注册 v1 版本的 spec discover server
+					apiservice.RegisterPolarisGRPCServer(server, g.v1server)
+					apiservice.RegisterPolarisHeartbeatGRPCServer(server, g.v1server)
+					apiservice.RegisterPolarisServiceContractGRPCServer(server, g.v1server)
+					openMethod, getErr := utils.GetDiscoverClientOpenMethod(config.Include, g.GetProtocol())
 					if getErr != nil {
 						return getErr
 					}
 					g.BaseGrpcServer.OpenMethod = openMethod
 				}
 			default:
-				log.Errorf("[Grpc][Discover] api %s does not exist in grpcserver", name)
+				namingLog.Errorf("[Grpc][Discover] api %s does not exist in grpcserver", name)
 				return fmt.Errorf("api %s does not exist in grpcserver", name)
 			}
 		}
-		// 引入功能模块和插件
-		var err error
-		if g.namingServer, err = service.GetServer(); err != nil {
-			log.Errorf("%v", err)
-			return err
-		}
-
-		if g.healthCheckServer, err = healthcheck.GetServer(); err != nil {
-			log.Errorf("%v", err)
-			return err
-		}
-
 		return nil
 	})
 }
@@ -122,23 +152,21 @@ func (g *GRPCServer) allowAccess(method string) bool {
 }
 
 func (g *GRPCServer) buildInitOptions(option map[string]interface{}) []grpcserver.InitOption {
-	cacheTypes := []string{
-		api.DiscoverResponse_INSTANCE.String(),
-		api.DiscoverResponse_CLUSTER.String(),
-		api.DiscoverResponse_ROUTING.String(),
-		api.DiscoverResponse_RATE_LIMIT.String(),
-		api.DiscoverResponse_CIRCUIT_BREAKER.String(),
-		api.DiscoverResponse_SERVICES.String(),
-	}
-
 	initOptions := []grpcserver.InitOption{
+		grpcserver.WithModule(authcommon.DiscoverModule),
 		grpcserver.WithProtocol(g.GetProtocol()),
+		grpcserver.WithLogger(commonlog.FindScope(commonlog.APIServerLoggerName)),
 		grpcserver.WithMessageToCacheObject(discoverCacheConvert),
 	}
 
-	cache, err := grpcserver.NewCache(option, cacheTypes)
+	types := make([]string, 0, len(cacheTypes))
+	for k := range cacheTypes {
+		types = append(types, k)
+	}
+
+	cache, err := grpcserver.NewCache(option, types)
 	if err != nil {
-		log.Warn("[Grpc][Discover] new protobuf cache", zap.Error(err))
+		namingLog.Warn("[Grpc][Discover] new protobuf cache", zap.Error(err))
 	}
 
 	if cache != nil {
@@ -148,19 +176,25 @@ func (g *GRPCServer) buildInitOptions(option map[string]interface{}) []grpcserve
 	return initOptions
 }
 
+// discoverCacheConvert 将 DiscoverResponse 转换为 grpcserver.CacheObject
 func discoverCacheConvert(m interface{}) *grpcserver.CacheObject {
-	resp, ok := m.(*api.DiscoverResponse)
-
+	resp, ok := m.(*apiservice.DiscoverResponse)
 	if !ok {
 		return nil
 	}
 
-	if resp.Code.GetValue() != api.ExecuteSuccess {
+	if resp.Code.GetValue() != uint32(apimodel.Code_ExecuteSuccess) {
+		return nil
+	}
+	if resp.GetService().GetRevision().GetValue() == "" {
+		return nil
+	}
+	if _, ok := cacheTypes[resp.GetType().String()]; !ok {
 		return nil
 	}
 
-	keyProto := fmt.Sprintf("%s-%s-%s", resp.Service.Namespace.GetValue(),
-		resp.Service.Name.GetValue(), resp.Service.Revision.GetValue())
+	keyProto := fmt.Sprintf("%s-%s-%s", resp.GetService().GetNamespace().GetValue(),
+		resp.GetService().GetName().GetValue(), resp.GetService().GetRevision().GetValue())
 
 	return &grpcserver.CacheObject{
 		OriginVal: resp,

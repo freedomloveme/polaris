@@ -22,8 +22,16 @@ import "strings"
 const (
 	// ReleaseTypeNormal 发布类型，全量发布
 	ReleaseTypeNormal = "normal"
-	// ReleaseTypeDelete 发布类型，删除配置文件
+	// ReleaseTypeGray 灰度发布
+	ReleaseTypeGray = "betaing"
+	// ReleaseTypeCancelGray 取消灰度发布
+	ReleaseTypeCancelGray = "cancel-gray"
+	// ReleaseTypeDelete 发布类型，删除配置发布
 	ReleaseTypeDelete = "delete"
+	// ReleaseTypeRollback 发布类型 回滚
+	ReleaseTypeRollback = "rollback"
+	// ReleaseTypeClean 发布类型，清空配置发布
+	ReleaseTypeClean = "clean"
 
 	// ReleaseStatusSuccess 发布成功状态
 	ReleaseStatusSuccess = "success"
@@ -41,12 +49,18 @@ const (
 	FileFormatProperties = "properties"
 
 	FileIdSeparator = "+"
-)
 
-func IsValidFileFormat(format string) bool {
-	return format == FileFormatText || format == FileFormatYaml || format == FileFormatXml ||
-		format == FileFormatJson || format == FileFormatHtml || format == FileFormatProperties
-}
+	// MaxRequestBodySize 导入配置文件请求体最大 4M
+	MaxRequestBodySize = 4 * 1024 * 1024
+	// ConfigFileFormKey 配置文件表单键
+	ConfigFileFormKey = "config"
+	// ConfigFileMetaFileName 配置文件元数据文件名
+	ConfigFileMetaFileName = "META"
+	// ConfigFileImportConflictSkip 导入配置文件发生冲突跳过
+	ConfigFileImportConflictSkip = "skip"
+	// ConfigFileImportConflictOverwrite 导入配置文件发生冲突覆盖原配置文件
+	ConfigFileImportConflictOverwrite = "overwrite"
+)
 
 // GenFileId 生成文件 Id
 func GenFileId(namespace, group, fileName string) string {
@@ -57,4 +71,10 @@ func GenFileId(namespace, group, fileName string) string {
 func ParseFileId(fileId string) (namespace, group, fileName string) {
 	fileInfo := strings.Split(fileId, FileIdSeparator)
 	return fileInfo[0], fileInfo[1], fileInfo[2]
+}
+
+// ConfigFileMeta 导入配置文件ZIP包中的元数据结构
+type ConfigFileMeta struct {
+	Tags    map[string]string `json:"tags"`
+	Comment string            `json:"comment"`
 }

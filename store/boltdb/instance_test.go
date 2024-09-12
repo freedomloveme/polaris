@@ -25,10 +25,11 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/ptypes/wrappers"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	"github.com/stretchr/testify/assert"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
-	commontime "github.com/polarismesh/polaris-server/common/time"
+	"github.com/polarismesh/polaris/common/model"
+	commontime "github.com/polarismesh/polaris/common/time"
 )
 
 const (
@@ -67,7 +68,7 @@ func batchAddInstances(t *testing.T, insStore *instanceStore, svcId string, insC
 		nowt := commontime.Time2String(time.Now())
 
 		err := insStore.AddInstance(&model.Instance{
-			Proto: &api.Instance{
+			Proto: &apiservice.Instance{
 				Id:                &wrappers.StringValue{Value: "insid" + strconv.Itoa(i)},
 				Host:              &wrappers.StringValue{Value: "1.1.1." + strconv.Itoa(i)},
 				Port:              &wrappers.UInt32Value{Value: uint32(i + 1)},
@@ -112,7 +113,7 @@ func TestInstanceStore_BatchAddInstances(t *testing.T) {
 		nowt := commontime.Time2String(time.Now())
 
 		ins := &model.Instance{
-			Proto: &api.Instance{
+			Proto: &apiservice.Instance{
 				Id:                &wrappers.StringValue{Value: "insid" + strconv.Itoa(i)},
 				Host:              &wrappers.StringValue{Value: "1.1.1." + strconv.Itoa(i)},
 				Port:              &wrappers.UInt32Value{Value: uint32(i)},
@@ -179,11 +180,19 @@ func TestInstanceStore_GetMoreInstances(t *testing.T) {
 	insStore := &instanceStore{handler: handler}
 	batchAddInstances(t, insStore, "svcid2", insCount)
 
+	tx, err := insStore.handler.StartTx()
+	assert.NoError(t, err)
+
+	t.Cleanup(func() {
+		tx.Rollback()
+	})
+
 	tt, _ := time.Parse("2006-01-02 15:04:05", "2021-01-02 15:04:05")
-	m, err := insStore.GetMoreInstances(tt, false, false, []string{"svcid2"})
+	m, err := insStore.GetMoreInstances(tx, tt, false, false, []string{"svcid2"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = tx.Commit()
 
 	if len(m) != 5 {
 		t.Fatal(fmt.Sprintf("get more instances error, except len is %d, got %d", 5, len(m)))
@@ -292,7 +301,7 @@ func TestInstanceStore_UpdateInstance(t *testing.T) {
 	batchAddInstances(t, insStore, "svcid1", insCount)
 
 	insM := &model.Instance{
-		Proto: &api.Instance{
+		Proto: &apiservice.Instance{
 			Id:                &wrappers.StringValue{Value: "insid" + strconv.Itoa(0)},
 			Service:           &wrappers.StringValue{Value: "svcid1"},
 			Namespace:         &wrappers.StringValue{Value: "testns"},

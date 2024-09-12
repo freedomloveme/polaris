@@ -1,10 +1,29 @@
+# Tencent is pleased to support the open source community by making Polaris available.
+#
+# Copyright (C) 2019 THL A29 Limited, a Tencent company. All rights reserved.
+#
+# Licensed under the BSD 3-Clause License (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://opensource.org/licenses/BSD-3-Clause
+#
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+
 name: Codecov
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - release*
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - release*
 
 permissions:
   contents: write
@@ -14,26 +33,73 @@ env:
   GO111MODULE: on
 
 jobs:
-
   build:
     runs-on: ubuntu-latest
+    services:
+      # Label used to access the service container
+      redis:
+        # Docker Hub image
+        image: redis
+        # Set health checks to wait until redis has started
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          # Maps port 6379 on service container to the host
+          - 6379:6379
     steps:
       # Setup the environment.
       - name: Setup Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.17.1
+          go-version: "1.21.5"
       # Checkout latest code
       - name: Checkout repo
         uses: actions/checkout@v2
         with:
           fetch-depth: 2
 
-      - name: Go Test
+      - name: Initialize database
+        env:
+          MYSQL_DB_USER: root
+          MYSQL_DB_PWD: root
+          MYSQL_DATABASE: polaris_server
+        run: |
+          sudo systemctl start mysql.service
+          mysql -e 'CREATE DATABASE ${{ env.MYSQL_DATABASE }};' -u${{ env.MYSQL_DB_USER }} -p${{ env.MYSQL_DB_PWD }}
+          mysql -e "ALTER USER '${{ env.MYSQL_DB_USER }}'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root';"  -u${{ env.MYSQL_DB_USER }} -p${{ env.MYSQL_DB_PWD }}
+
+      # Execute vert check
+      # - name: Vert check
+      #   run: bash vert.sh -install && bash vert.sh
+
+      - name: Standalone Test
+        env:
+          MYSQL_DB_USER: root
+          MYSQL_DB_PWD: root
+          RUN_MODE: STANDALONE
         run: |
           # bash coverage.sh
-          go mod vendor && go test  -timeout 40m ./... -v -coverprofile=coverage.txt -coverpkg=github.com/polarismesh/polaris-server/auth/defaultauth,github.com/polarismesh/polaris-server/service,github.com/polarismesh/polaris-server/service/batch,github.com/polarismesh/polaris-server/cache,github.com/polarismesh/polaris-server/store/boltdb,github.com/polarismesh/polaris-server/store/sqldb,github.com/polarismesh/polaris-server/plugin/ratelimit/token,github.com/polarismesh/polaris-server/config,github.com/polarismesh/polaris-server/common/model
+          export MYSQL_DB_USER=${{ env.MYSQL_DB_USER }}
+          export MYSQL_DB_PWD=${{ env.MYSQL_DB_PWD }}
+          bash test/codecov.sh
 
+      - name: Cluster Test
+        env:
+          MYSQL_DB_USER: root
+          MYSQL_DB_PWD: root
+          REDIS_ADDR: 127.0.0.1:6379
+          REDIS_PWD: ""
+          RUN_MODE: CLUSTER
+        run: |
+          # bash coverage.sh
+          export MYSQL_DB_USER=${{ env.MYSQL_DB_USER }}
+          export MYSQL_DB_PWD=${{ env.MYSQL_DB_PWD }}
+          bash test/codecov.sh
 
-      - name: Coverage
-        run: bash <(curl -s https://codecov.io/bash)
+      - name: Upload Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

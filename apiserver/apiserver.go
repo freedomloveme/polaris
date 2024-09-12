@@ -20,15 +20,15 @@ package apiserver
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"github.com/polarismesh/polaris-server/common/log"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 const (
 	DiscoverAccess    string = "discover"
 	RegisterAccess    string = "register"
 	HealthcheckAccess string = "healthcheck"
+	CreateFileAccess  string = "createfile"
 )
 
 // Config API服务器配置
@@ -46,18 +46,23 @@ type APIConfig struct {
 
 // Apiserver API服务器接口
 type Apiserver interface {
-	// API协议名
+	// GetProtocol API协议名
 	GetProtocol() string
-	// API的监听端口
+	// GetPort API的监听端口
 	GetPort() uint32
-	// API初始化逻辑
+	// Initialize API初始化逻辑
 	Initialize(ctx context.Context, option map[string]interface{}, api map[string]APIConfig) error
-	// API服务的主逻辑循环
+	// Run API服务的主逻辑循环
 	Run(errCh chan error)
-	// 停止API端口监听
+	// Stop 停止API端口监听
 	Stop()
-	// 重启API
+	// Restart 重启API
 	Restart(option map[string]interface{}, api map[string]APIConfig, errCh chan error) error
+}
+
+type EnrichApiserver interface {
+	Apiserver
+	DebugHandlers() []model.DebugHandler
 }
 
 var (
@@ -73,34 +78,4 @@ func Register(name string, server Apiserver) error {
 	Slots[name] = server
 
 	return nil
-}
-
-// GetClientOpenMethod 获取客户端openMethod
-func GetClientOpenMethod(include []string, protocol string) (map[string]bool, error) {
-	clientAccess := make(map[string][]string)
-	clientAccess[DiscoverAccess] = []string{"Discover", "ReportClient"}
-	clientAccess[RegisterAccess] = []string{"RegisterInstance", "DeregisterInstance"}
-	clientAccess[HealthcheckAccess] = []string{"Heartbeat"}
-
-	openMethod := make(map[string]bool)
-	// 如果为空，开启全部接口
-	if len(include) == 0 {
-		for key := range clientAccess {
-			include = append(include, key)
-		}
-	}
-
-	for _, item := range include {
-		if methods, ok := clientAccess[item]; ok {
-			for _, method := range methods {
-				method = "/v1.Polaris" + strings.ToUpper(protocol) + "/" + method
-				openMethod[method] = true
-			}
-		} else {
-			log.Errorf("method %s does not exist in %sserver client access", item, protocol)
-			return nil, fmt.Errorf("method %s does not exist in %sserver client access", item, protocol)
-		}
-	}
-
-	return openMethod, nil
 }

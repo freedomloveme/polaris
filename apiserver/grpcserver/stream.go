@@ -23,9 +23,12 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+
+	commonlog "github.com/polarismesh/polaris/common/log"
 )
 
 // initVirtualStream 对 VirtualStream 的一些初始化动作
@@ -63,6 +66,13 @@ func WithVirtualStreamPostProcessFunc(postprocess PostProcessFunc) initVirtualSt
 func WithVirtualStreamBaseServer(server *BaseGrpcServer) initVirtualStream {
 	return func(vStream *VirtualStream) {
 		vStream.server = server
+	}
+}
+
+// WithVirtualStreamLogger 设置 Logger
+func WithVirtualStreamLogger(log *commonlog.Scope) initVirtualStream {
+	return func(vStream *VirtualStream) {
+		vStream.log = log
 	}
 }
 
@@ -130,14 +140,16 @@ type VirtualStream struct {
 	postprocess PostProcessFunc
 
 	StartTime time.Time
+
+	log *commonlog.Scope
 }
 
 // SetHeader sets the header metadata. It may be called multiple times.
 // When call multiple times, all the provided metadata will be merged.
 // All the metadata will be sent out when one of the following happens:
-//  - ServerStream.SendHeader() is called;
-//  - The first response is sent out;
-//  - An RPC status is sent out (error or success).
+//   - ServerStream.SendHeader() is called;
+//   - The first response is sent out;
+//   - An RPC status is sent out (error or success).
 func (v *VirtualStream) SetHeader(md metadata.MD) error {
 	return v.stream.SetHeader(md)
 }
@@ -199,14 +211,11 @@ func (v *VirtualStream) RecvMsg(m interface{}) error {
 // to call SendMsg on the same stream in different goroutines.
 func (v *VirtualStream) SendMsg(m interface{}) error {
 	v.postprocess(v, m)
-
 	m = v.handleResponse(v.stream, m)
-
 	err := v.stream.SendMsg(m)
 	if err != nil {
 		v.Code = -2
 	}
-
 	return err
 }
 
@@ -225,10 +234,16 @@ func (v *VirtualStream) handleResponse(stream grpc.ServerStream, m interface{}) 
 	}
 
 	if err := cacheVal.PrepareMessage(stream); err != nil {
+		v.log.Warn("[Grpc][ProtoCache] prepare message fail, direct send msg", zap.String("key", cacheVal.Key),
+			zap.Error(err))
 		return m
 	}
 
-	cacheVal = v.server.cache.Put(cacheVal)
+	cacheVal, ok := v.server.cache.Put(cacheVal)
+	if !ok {
+		v.log.Warn("[Grpc][ProtoCache] put cache ignore", zap.String("key", cacheVal.Key),
+			zap.String("cacheType", cacheVal.CacheType))
+	}
 	if cacheVal == nil {
 		return m
 	}

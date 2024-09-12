@@ -25,10 +25,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/polarismesh/polaris-server/apiserver"
-	"github.com/polarismesh/polaris-server/common/api/l5"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/service"
+	"github.com/polarismesh/polaris/apiserver"
+	"github.com/polarismesh/polaris/common/api/l5"
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/plugin"
+	"github.com/polarismesh/polaris/service"
 )
 
 const (
@@ -162,7 +163,13 @@ func (l *L5pbserver) PostProcess(req *cl5Request) {
 		)
 	}
 	code := calL5Code(req.code)
-	_ = l.statis.AddAPICall(cmdStr, "HTTP", code, diff.Nanoseconds())
+	l.statis.ReportCallMetrics(metrics.CallMetric{
+		Type:     metrics.ServerCallMetric,
+		API:      cmdStr,
+		Protocol: "HTTP",
+		Code:     int(code),
+		Duration: diff,
+	})
 	// 告警
 }
 

@@ -23,32 +23,39 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/protobuf/ptypes/wrappers"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	"go.uber.org/zap"
+	"gopkg.in/yaml.v2"
 
-	"github.com/polarismesh/polaris-server/auth"
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/maintain"
-	"github.com/polarismesh/polaris-server/namespace"
-	"github.com/polarismesh/polaris-server/service/batch"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
-
-	"github.com/polarismesh/polaris-server/apiserver"
-	boot_config "github.com/polarismesh/polaris-server/bootstrap/config"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/utils"
-	"github.com/polarismesh/polaris-server/common/version"
-	config_center "github.com/polarismesh/polaris-server/config"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/service"
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/admin"
+	"github.com/polarismesh/polaris/apiserver"
+	"github.com/polarismesh/polaris/auth"
+	boot_config "github.com/polarismesh/polaris/bootstrap/config"
+	"github.com/polarismesh/polaris/cache"
+	cachetypes "github.com/polarismesh/polaris/cache/api"
+	api "github.com/polarismesh/polaris/common/api/v1"
+	"github.com/polarismesh/polaris/common/eventhub"
+	"github.com/polarismesh/polaris/common/log"
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/common/model"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/common/version"
+	config_center "github.com/polarismesh/polaris/config"
+	"github.com/polarismesh/polaris/namespace"
+	"github.com/polarismesh/polaris/plugin"
+	"github.com/polarismesh/polaris/service"
+	"github.com/polarismesh/polaris/service/batch"
+	"github.com/polarismesh/polaris/service/healthcheck"
+	"github.com/polarismesh/polaris/store"
 )
 
 var (
-	SelfServiceInstance = make([]*api.Instance, 0)
+	SelfServiceInstance = make([]*apiservice.Instance, 0)
 	ConfigFilePath      = ""
 	selfHeathChecker    *SelfHeathChecker
 )
@@ -57,13 +64,19 @@ var (
 func Start(configFilePath string) {
 	// 加载配置
 	ConfigFilePath = configFilePath
+	utils.ConfDir = parseConfDir(configFilePath)
 	cfg, err := boot_config.Load(configFilePath)
 	if err != nil {
 		fmt.Printf("[ERROR] load config fail\n")
 		return
 	}
 
-	fmt.Printf("[INFO] %+v\n", *cfg)
+	c, err := yaml.Marshal(cfg)
+	if err != nil {
+		fmt.Printf("[ERROR] config yaml marshal fail\n")
+		return
+	}
+	fmt.Printf(string(c))
 
 	// 初始化日志打印
 	err = log.Configure(cfg.Bootstrap.Logger)
@@ -82,6 +95,11 @@ func Start(configFilePath string) {
 		fmt.Printf("[ERROR] acquire localhost fail: %v\n", err)
 		return
 	}
+	// 设置默认端口信息数据
+	acquireLocalPort(ctx, cfg.APIServers)
+
+	metrics.InitMetrics()
+	eventhub.InitEventHub()
 
 	// 设置插件配置
 	plugin.SetPluginConfig(&cfg.Plugin)
@@ -122,7 +140,9 @@ func Start(configFilePath string) {
 	_ = FinishBootstrapOrder(tx) // 启动完成，解锁
 	fmt.Println("finish starting server")
 
-	RunMainLoop(servers, errCh)
+	// 等待信号量
+	WaitSignal(servers, errCh)
+	fmt.Println("begin stop server")
 }
 
 // StartComponents start health check and naming components
@@ -146,12 +166,22 @@ func StartComponents(ctx context.Context, cfg *boot_config.Config) error {
 		return err
 	}
 
+	// 开启灰度规则缓存
+	_ = cacheMgn.OpenResourceCache(cachetypes.ConfigEntry{
+		Name: cachetypes.GrayName,
+	})
+
 	// 初始化鉴权层
 	if err = auth.Initialize(ctx, &cfg.Auth, s, cacheMgn); err != nil {
 		return err
 	}
 
-	authMgn, err := auth.GetAuthServer()
+	userMgn, err := auth.GetUserServer()
+	if err != nil {
+		return err
+	}
+
+	strategyMgn, err := auth.GetStrategyServer()
 	if err != nil {
 		return err
 	}
@@ -162,16 +192,16 @@ func StartComponents(ctx context.Context, cfg *boot_config.Config) error {
 	}
 
 	// 初始化服务发现模块相关功能
-	if err := StartDiscoverComponents(ctx, cfg, s, cacheMgn, authMgn); err != nil {
+	if err := StartDiscoverComponents(ctx, cfg, s, cacheMgn); err != nil {
 		return err
 	}
 
 	// 初始化配置中心模块相关功能
-	if err := StartConfigCenterComponents(ctx, cfg, s, cacheMgn, authMgn); err != nil {
+	if err := StartConfigCenterComponents(ctx, cfg, s, cacheMgn, userMgn, strategyMgn); err != nil {
 		return err
 	}
 
-	namingSvr, err := service.GetOriginServer()
+	namingSvr, err := service.GetServer()
 	if err != nil {
 		return err
 	}
@@ -181,23 +211,19 @@ func StartComponents(ctx context.Context, cfg *boot_config.Config) error {
 	}
 
 	// 初始化运维操作模块
-	if err := maintain.Initialize(ctx, namingSvr, healthCheckServer); err != nil {
+	if err := admin.Initialize(ctx, &cfg.Maintain, namingSvr, healthCheckServer, cacheMgn, s); err != nil {
 		return err
 	}
 
 	// 最后启动 cache
-	if err := cache.Run(ctx); err != nil {
+	if err := cache.Run(cacheMgn, ctx); err != nil {
 		return err
 	}
-
 	return nil
 }
 
 func StartDiscoverComponents(ctx context.Context, cfg *boot_config.Config, s store.Store,
-	cacheMgn *cache.CacheManager, authMgn auth.AuthServer) error {
-
-	var err error
-
+	cacheMgn *cache.CacheManager) error {
 	// 批量控制器
 	namingBatchConfig, err := batch.ParseBatchConfig(cfg.Naming.Batch)
 	if err != nil {
@@ -210,7 +236,7 @@ func StartDiscoverComponents(ctx context.Context, cfg *boot_config.Config, s sto
 
 	batchConfig := &batch.Config{
 		Register:         namingBatchConfig.Register,
-		Deregister:       namingBatchConfig.Register,
+		Deregister:       namingBatchConfig.Deregister,
 		ClientRegister:   namingBatchConfig.ClientRegister,
 		ClientDeregister: namingBatchConfig.ClientDeregister,
 		Heartbeat:        healthBatchConfig.Heartbeat,
@@ -226,40 +252,61 @@ func StartDiscoverComponents(ctx context.Context, cfg *boot_config.Config, s sto
 	if len(cfg.HealthChecks.LocalHost) == 0 {
 		cfg.HealthChecks.LocalHost = utils.LocalHost // 补充healthCheck的配置
 	}
-	if err = healthcheck.Initialize(ctx, &cfg.HealthChecks, cfg.Cache.Open, bc); err != nil {
+	if err = healthcheck.Initialize(ctx, &cfg.HealthChecks, bc); err != nil {
 		return err
 	}
 	healthCheckServer, err := healthcheck.GetServer()
 	if err != nil {
 		return err
 	}
-	cacheProvider, err := healthCheckServer.CacheProvider()
+	if cfg.HealthChecks.IsOpen() {
+		healthCheckServer.SetServiceCache(cacheMgn.Service())
+		healthCheckServer.SetInstanceCache(cacheMgn.Instance())
+	}
+
+	namespaceSvr, err := namespace.GetServer()
 	if err != nil {
 		return err
 	}
-	healthCheckServer.SetServiceCache(cacheMgn.Service())
 
-	// 为 instance 的 cache 添加 健康检查的 Listener
-	cacheMgn.AddListener(cache.CacheNameInstance, []cache.Listener{cacheProvider})
-	cacheMgn.AddListener(cache.CacheNameClient, []cache.Listener{cacheProvider})
+	opts := []service.InitOption{
+		service.WithBatchController(bc),
+		service.WithStorage(s),
+		service.WithCacheManager(&cfg.Cache, cacheMgn),
+		service.WithHealthCheckSvr(healthCheckServer),
+		service.WithNamespaceSvr(namespaceSvr),
+	}
 
+	cfg.Naming.Interceptors = service.GetChainOrder()
 	// 初始化服务模块
-	if err = service.Initialize(ctx, &cfg.Naming, &cfg.Cache, bc); err != nil {
+	if err = service.Initialize(ctx, &cfg.Naming, opts...); err != nil {
 		return err
 	}
 
-	_, err = service.GetServer()
-	if err != nil {
+	if _, err = service.GetServer(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
+func parseConfDir(path string) string {
+	slashIndex := strings.LastIndex(path, "/")
+	if slashIndex == -1 {
+		return "./"
+	}
+	return path[0 : slashIndex+1]
+}
+
 // StartConfigCenterComponents 启动配置中心模块
 func StartConfigCenterComponents(ctx context.Context, cfg *boot_config.Config, s store.Store,
-	cacheMgn *cache.CacheManager, authMgn auth.AuthServer) error {
-	return config_center.Initialize(ctx, cfg.Config, s, cacheMgn, authMgn)
+	cacheMgn *cache.CacheManager, userMgn auth.UserServer, strategyMgn auth.StrategyServer) error {
+	namespaceOperator, err := namespace.GetServer()
+	if err != nil {
+		return err
+	}
+	cfg.Config.Interceptors = config_center.GetChainOrder()
+	return config_center.Initialize(ctx, cfg.Config, s, cacheMgn, namespaceOperator)
 }
 
 // StartServers 启动server
@@ -267,11 +314,17 @@ func StartServers(ctx context.Context, cfg *boot_config.Config, errCh chan error
 	[]apiserver.Apiserver, error) {
 	// 启动API服务器
 	var servers []apiserver.Apiserver
+
+	// 等待所有ApiServer都监听完成
 	for _, protocol := range cfg.APIServers {
 		slot, exist := apiserver.Slots[protocol.Name]
 		if !exist {
-			fmt.Printf("[ERROR] apiserver slot %s not exists\n", protocol.Name)
-			return nil, fmt.Errorf("apiserver slot %s not exists", protocol.Name)
+			log.Warn("[ERROR] apiserver slot not exists", zap.String("name", protocol.Name))
+			continue
+		}
+		// 如果是 http server, 注入所有的 apiserver 实例
+		if protocol.Name == "api-http" {
+			ctx = context.WithValue(ctx, utils.ContextAPIServerSlot{}, apiserver.Slots)
 		}
 
 		err := slot.Initialize(ctx, protocol.Option, protocol.API)
@@ -283,7 +336,6 @@ func StartServers(ctx context.Context, cfg *boot_config.Config, errCh chan error
 		servers = append(servers, slot)
 		go slot.Run(errCh)
 	}
-
 	return servers, nil
 }
 
@@ -296,20 +348,7 @@ func RestartServers(errCh chan error) error {
 		return err
 	}
 	log.Infof("new config: %+v", cfg)
-
-	// 把配置的每个apiserver，进行重启
-
-	for _, protocol := range cfg.APIServers {
-		server, exist := apiserver.Slots[protocol.Name]
-		if !exist {
-			log.Errorf("api server slot %s not exists\n", protocol.Name)
-			return err
-		}
-		log.Infof("begin restarting server: %s", protocol.Name)
-		if err := server.Restart(protocol.Option, protocol.API, errCh); err != nil {
-			return err
-		}
-	}
+	// TODO: 配置的动态加载后续统一设计
 	return nil
 }
 
@@ -319,16 +358,23 @@ func StopServers(servers []apiserver.Apiserver) {
 	if nil != selfHeathChecker {
 		selfHeathChecker.Stop()
 	}
+	// sync stop servers
+	wg := &sync.WaitGroup{}
+	for _, s := range servers {
+		wg.Add(1)
+		go func(s apiserver.Apiserver, wg *sync.WaitGroup) {
+			defer wg.Done()
+			log.Infof("start stop server protocol: %s", s.GetProtocol())
+			s.Stop()
+			log.Infof("complete stop server protocol: %s", s.GetProtocol())
+		}(s, wg)
+	}
+	wg.Wait()
 	// deregister instances
 	SelfDeregister()
-	// 停掉服务
-	for _, s := range servers {
-		log.Infof("stop server protocol: %s", s.GetProtocol())
-		s.Stop()
-	}
 }
 
-// StartBootstrapOrder 开始进入启动加锁
+// StartBootstrapInOrder 开始进入启动加锁
 // 原因：Server启动的时候会从数据库拉取大量数据，防止同时启动把DB压死
 // 还有一种场景，server全部宕机批量重启，导致数据库被压死，导致雪崩
 func StartBootstrapInOrder(s store.Store, c *boot_config.Config) (store.Transaction, error) {
@@ -392,7 +438,13 @@ func FinishBootstrapOrder(tx store.Transaction) error {
 
 func genContext() context.Context {
 	ctx := context.Background()
+	reqCtx := context.WithValue(context.Background(), utils.ContextAuthTokenKey, "")
 	ctx = context.WithValue(ctx, utils.StringContext("request-id"), fmt.Sprintf("self-%d", time.Now().Nanosecond()))
+	ctx = context.WithValue(ctx, utils.ContextAuthContextKey,
+		authcommon.NewAcquireContext(
+			authcommon.WithOperation(authcommon.Read),
+			authcommon.WithModule(authcommon.BootstrapModule),
+			authcommon.WithRequestContext(reqCtx)))
 	return ctx
 }
 
@@ -402,6 +454,30 @@ func acquireLocalhost(ctx context.Context, polarisService *boot_config.PolarisSe
 		log.Infof("[Bootstrap] polaris service config not found")
 		return ctx, nil
 	}
+	if len(polarisService.SelfAddress) != 0 {
+		utils.LocalHost = polarisService.SelfAddress
+		return utils.WithLocalhost(ctx, utils.LocalHost), nil
+	}
+	if len(polarisService.NetworkInter) != 0 {
+		netInter, err := net.InterfaceByName(polarisService.NetworkInter)
+		if err != nil {
+			log.Errorf("get local host by network_interface: %s err: %s", polarisService.NetworkInter, err.Error())
+			return nil, err
+		}
+		addrs, err := netInter.Addrs()
+		if err != nil {
+			log.Errorf("get local host by network_interface: %s err: %s", polarisService.NetworkInter, err.Error())
+			return nil, err
+		}
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					utils.LocalHost = ipnet.IP.String()
+					return utils.WithLocalhost(ctx, utils.LocalHost), nil
+				}
+			}
+		}
+	}
 
 	localHost, err := getLocalHost(polarisService.ProbeAddress)
 	if err != nil {
@@ -410,8 +486,19 @@ func acquireLocalhost(ctx context.Context, polarisService *boot_config.PolarisSe
 	}
 	log.Infof("[Bootstrap] get local host: %s", localHost)
 	utils.LocalHost = localHost
+	return utils.WithLocalhost(ctx, utils.LocalHost), nil
+}
 
-	return utils.WithLocalhost(ctx, localHost), nil
+func acquireLocalPort(ctx context.Context, apientries []apiserver.Config) {
+	for i := range apientries {
+		entry := apientries[i]
+		if entry.Name != "service-grpc" {
+			continue
+		}
+		port, _ := entry.Option["listenPort"].(int)
+		utils.LocalPort = port
+		break
+	}
 }
 
 // polarisServiceRegister 自注册主函数
@@ -459,7 +546,7 @@ func polarisServiceRegister(polarisService *boot_config.PolarisService, apiServe
 				host, port, protocol, svc)
 		}
 	}
-	if len(SelfServiceInstance) > 0 {
+	if len(SelfServiceInstance) > 0 && !polarisService.DisableHeartbeat {
 		log.Infof("start self health checker")
 		var err error
 		if selfHeathChecker, err = NewSelfHeathChecker(SelfServiceInstance, hbInterval); nil != err {
@@ -474,31 +561,19 @@ func polarisServiceRegister(polarisService *boot_config.PolarisService, apiServe
 // selfRegister 服务自注册
 func selfRegister(
 	host string, port uint32, protocol string, isolated bool, polarisService *boot_config.Service, hbInterval int) error {
-	server, err := service.GetOriginServer()
-	if err != nil {
-		return err
-	}
-	storage, err := store.GetStore()
+	server, err := service.GetServer()
 	if err != nil {
 		return err
 	}
 
 	name := boot_config.DefaultPolarisName
-	namespace := boot_config.DefaultPolarisNamespace
+	polarisNamespace := boot_config.DefaultPolarisNamespace
 	if polarisService.Name != "" {
 		name = polarisService.Name
 	}
 
 	if polarisService.Namespace != "" {
-		namespace = polarisService.Namespace
-	}
-
-	svc, err := storage.GetService(name, namespace)
-	if err != nil {
-		return err
-	}
-	if svc == nil {
-		return fmt.Errorf("self service(%s) in namespace(%s) not found", name, namespace)
+		polarisNamespace = polarisService.Namespace
 	}
 
 	metadata := polarisService.Metadata
@@ -508,26 +583,25 @@ func selfRegister(
 	metadata[model.MetaKeyBuildRevision] = version.GetRevision()
 	metadata[model.MetaKeyPolarisService] = name
 
-	req := &api.Instance{
+	req := &apiservice.Instance{
 		Service:           utils.NewStringValue(name),
-		Namespace:         utils.NewStringValue(namespace),
+		Namespace:         utils.NewStringValue(polarisNamespace),
 		Host:              utils.NewStringValue(host),
 		Port:              utils.NewUInt32Value(port),
 		Protocol:          utils.NewStringValue(protocol),
-		ServiceToken:      utils.NewStringValue(svc.Token),
 		Version:           utils.NewStringValue(version.Get()),
 		EnableHealthCheck: utils.NewBoolValue(true),
 		Isolate:           utils.NewBoolValue(isolated),
-		HealthCheck: &api.HealthCheck{
-			Type: api.HealthCheck_HEARTBEAT,
-			Heartbeat: &api.HeartbeatHealthCheck{
+		HealthCheck: &apiservice.HealthCheck{
+			Type: apiservice.HealthCheck_HEARTBEAT,
+			Heartbeat: &apiservice.HeartbeatHealthCheck{
 				Ttl: &wrappers.UInt32Value{Value: uint32(hbInterval)},
 			},
 		},
 		Metadata: metadata,
 	}
 
-	resp := server.CreateInstance(genContext(), req)
+	resp := server.RegisterInstance(genContext(), req)
 	if api.CalcCode(resp) != 200 {
 		// 如果self之前注册过，那么可以忽略
 		if resp.GetCode().GetValue() != api.ExistedResource {
@@ -538,7 +612,6 @@ func selfRegister(
 		if api.CalcCode(resp) != 200 {
 			return fmt.Errorf("%s", resp.GetInfo().GetValue())
 		}
-
 	}
 	SelfServiceInstance = append(SelfServiceInstance, req)
 
@@ -559,6 +632,8 @@ func SelfDeregister() {
 			log.Errorf("Deregister instance error: %s", resp.GetInfo().GetValue())
 		}
 	}
+	// wait the async event handler to finish
+	time.Sleep(5 * time.Second)
 }
 
 // getLocalHost 获取本地IP地址
@@ -570,7 +645,9 @@ func getLocalHost(addr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	localAddr := conn.LocalAddr().String() // ip:port
 	segs := strings.Split(localAddr, ":")
@@ -579,4 +656,20 @@ func getLocalHost(addr string) (string, error) {
 	}
 
 	return segs[0], nil
+}
+
+// getSelfRegisterPolarsServiceKeySet 获取自注册的系统服务集合
+func getSelfRegisterPolarsServiceKeySet(polarisServiceCfg *boot_config.PolarisService) map[model.ServiceKey]struct{} {
+	if polarisServiceCfg == nil {
+		return nil
+	}
+	polarisServiceSet := make(map[model.ServiceKey]struct{})
+	for _, svc := range polarisServiceCfg.Services {
+		ns, n := svc.Namespace, svc.Name
+		if ns == "" {
+			ns = boot_config.DefaultPolarisNamespace
+		}
+		polarisServiceSet[model.ServiceKey{Namespace: ns, Name: n}] = struct{}{}
+	}
+	return polarisServiceSet
 }

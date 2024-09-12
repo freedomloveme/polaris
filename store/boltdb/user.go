@@ -23,51 +23,51 @@ import (
 	"strings"
 	"time"
 
-	"github.com/boltdb/bolt"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
-	logger "github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/common/utils"
-	"github.com/polarismesh/polaris-server/store"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/store"
 )
 
 const (
 	// 用户数据 scope
 	tblUser string = "user"
 
-	// 用户ID字段
+	// UserFieldID 用户ID字段
 	UserFieldID string = "ID"
-	// 用户名字段
+	// UserFieldName 用户名字段
 	UserFieldName string = "Name"
-	// 用户密码字段
+	// UserFieldPassword 用户密码字段
 	UserFieldPassword string = "Password"
-	// 用户Owner字段
+	// UserFieldOwner 用户Owner字段
 	UserFieldOwner string = "Owner"
-	// 用户来源字段
+	// UserFieldSource 用户来源字段
 	UserFieldSource string = "Source"
-	// 用户类型字段
+	// UserFieldType 用户类型字段
 	UserFieldType string = "Type"
-	// 用户Token字段
+	// UserFieldToken 用户Token字段
 	UserFieldToken string = "Token"
-	// 用户Token是否可用字段
+	// UserFieldTokenEnable 用户Token是否可用字段
 	UserFieldTokenEnable string = "TokenEnable"
-	// 用户逻辑删除字段
+	// UserFieldValid 用户逻辑删除字段
 	UserFieldValid string = "Valid"
-	// 用户备注字段
+	// UserFieldComment 用户备注字段
 	UserFieldComment string = "Comment"
-	// 用户创建时间字段
+	// UserFieldCreateTime 用户创建时间字段
 	UserFieldCreateTime string = "CreateTime"
-	// 用户修改时间字段
+	// UserFieldModifyTime 用户修改时间字段
 	UserFieldModifyTime string = "ModifyTime"
-	// 用户手机号信息
+	// UserFieldMobile 用户手机号信息
 	UserFieldMobile string = "Mobile"
-	// 用户邮箱信息
+	// UserFieldEmail 用户邮箱信息
 	UserFieldEmail string = "Email"
 )
 
 var (
-	MultipleUserFound error = errors.New("multiple user found")
+	// ErrMultipleUserFound 多个用户
+	ErrMultipleUserFound = errors.New("multiple user found")
 )
 
 // userStore
@@ -76,7 +76,7 @@ type userStore struct {
 }
 
 // AddUser 添加用户
-func (us *userStore) AddUser(user *model.User) error {
+func (us *userStore) AddUser(tx store.Tx, user *authcommon.User) error {
 
 	initUser(user)
 
@@ -85,54 +85,22 @@ func (us *userStore) AddUser(user *model.User) error {
 		return store.NewStatusError(store.EmptyParamsErr, "add user missing some params")
 	}
 
-	return us.addUser(user)
-}
-
-func (us *userStore) addUser(user *model.User) error {
-	proxy, err := us.handler.StartTx()
-	if err != nil {
-		return err
-	}
-	tx := proxy.GetDelegateTx().(*bolt.Tx)
-
-	defer tx.Rollback()
-
+	dbTx := tx.GetDelegateTx().(*bolt.Tx)
 	owner := user.Owner
 	if owner == "" {
 		owner = user.ID
 	}
 
 	// 添加用户信息
-	if err := us.addUserMain(tx, user); err != nil {
-		return err
-	}
-
-	// 添加用户的默认策略
-	if err := createDefaultStrategy(tx, model.PrincipalUser, user.ID, user.Name, owner); err != nil {
-		logger.StoreScope().Error("[Store][User] create user default strategy fail", zap.Error(err),
-			zap.String("name", user.Name))
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		logger.StoreScope().Error("[Store][User] save user tx commit fail", zap.Error(err),
-			zap.String("name", user.Name))
-		return err
-	}
-	return nil
-}
-
-func (us *userStore) addUserMain(tx *bolt.Tx, user *model.User) error {
-	// 添加用户信息
-	if err := saveValue(tx, tblUser, user.ID, converToUserStore(user)); err != nil {
-		logger.StoreScope().Error("[Store][User] save user fail", zap.Error(err), zap.String("name", user.Name))
+	if err := saveValue(dbTx, tblUser, user.ID, converToUserStore(user)); err != nil {
+		log.Error("[Store][User] save user fail", zap.Error(err), zap.String("name", user.Name))
 		return err
 	}
 	return nil
 }
 
 // UpdateUser
-func (us *userStore) UpdateUser(user *model.User) error {
+func (us *userStore) UpdateUser(user *authcommon.User) error {
 	if user.ID == "" || user.Token == "" {
 		return store.NewStatusError(store.EmptyParamsErr, "update user missing some params")
 	}
@@ -141,12 +109,14 @@ func (us *userStore) UpdateUser(user *model.User) error {
 	properties[UserFieldComment] = user.Comment
 	properties[UserFieldToken] = user.Token
 	properties[UserFieldTokenEnable] = user.TokenEnable
+	properties[UserFieldEmail] = user.Email
+	properties[UserFieldMobile] = user.Mobile
 	properties[UserFieldPassword] = user.Password
 	properties[UserFieldModifyTime] = time.Now()
 
 	err := us.handler.UpdateValue(tblUser, user.ID, properties)
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] update user fail", zap.Error(err), zap.String("id", user.ID))
+		log.Error("[Store][User] update user fail", zap.Error(err), zap.String("id", user.ID))
 		return err
 	}
 
@@ -154,52 +124,25 @@ func (us *userStore) UpdateUser(user *model.User) error {
 }
 
 // DeleteUser 删除用户
-func (us *userStore) DeleteUser(user *model.User) error {
+func (us *userStore) DeleteUser(tx store.Tx, user *authcommon.User) error {
 	if user.ID == "" {
 		return store.NewStatusError(store.EmptyParamsErr, "delete user missing some params")
 	}
-
-	return us.deleteUser(user)
-}
-
-func (us *userStore) deleteUser(user *model.User) error {
-	proxy, err := us.handler.StartTx()
-	if err != nil {
-		return err
-	}
-	tx := proxy.GetDelegateTx().(*bolt.Tx)
-
-	defer tx.Rollback()
+	dbTx := tx.GetDelegateTx().(*bolt.Tx)
 
 	properties := make(map[string]interface{})
 	properties[UserFieldValid] = false
 	properties[UserFieldModifyTime] = time.Now()
 
-	if err := updateValue(tx, tblUser, user.ID, properties); err != nil {
-		logger.StoreScope().Error("[Store][User] delete user by id", zap.Error(err), zap.String("id", user.ID))
+	if err := updateValue(dbTx, tblUser, user.ID, properties); err != nil {
+		log.Error("[Store][User] delete user by id", zap.Error(err), zap.String("id", user.ID))
 		return err
 	}
-
-	owner := user.Owner
-	if owner == "" {
-		owner = user.ID
-	}
-
-	if err := cleanLinkStrategy(tx, model.PrincipalUser, user.ID, user.Owner); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		logger.StoreScope().Error("[Store][User] delete user tx commit", zap.Error(err), zap.String("id", user.ID))
-		return err
-	}
-
 	return nil
 }
 
-// GetUser
-func (us *userStore) GetUser(id string) (*model.User, error) {
-
+// GetUser 获取用户
+func (us *userStore) GetUser(id string) (*authcommon.User, error) {
 	if id == "" {
 		return nil, store.NewStatusError(store.EmptyParamsErr, "get user missing some params")
 	}
@@ -209,31 +152,27 @@ func (us *userStore) GetUser(id string) (*model.User, error) {
 		return nil, err
 	}
 	tx := proxy.GetDelegateTx().(*bolt.Tx)
-
-	defer tx.Rollback()
+	defer func() {
+		_ = tx.Rollback()
+	}()
 
 	return us.getUser(tx, id)
 }
 
-// GetUser
-func (us *userStore) getUser(tx *bolt.Tx, id string) (*model.User, error) {
-
+// GetUser 获取用户
+func (us *userStore) getUser(tx *bolt.Tx, id string) (*authcommon.User, error) {
 	if id == "" {
-		return nil, store.NewStatusError(store.EmptyParamsErr, "get user missing some params")
+		return nil, store.NewStatusError(store.EmptyParamsErr, "get user missing id params")
 	}
 
 	ret := make(map[string]interface{})
 	if err := loadValues(tx, tblUser, []string{id}, &userForStore{}, ret); err != nil {
-		logger.StoreScope().Error("[Store][User] get user by id", zap.Error(err), zap.String("id", id))
+		log.Error("[Store][User] get user by id", zap.Error(err), zap.String("id", id))
 		return nil, err
 	}
 	if len(ret) == 0 {
 		return nil, nil
 	}
-	if len(ret) > 1 {
-		return nil, MultipleUserFound
-	}
-
 	user := ret[id].(*userForStore)
 	if !user.Valid {
 		return nil, nil
@@ -242,22 +181,24 @@ func (us *userStore) getUser(tx *bolt.Tx, id string) (*model.User, error) {
 	return converToUserModel(user), nil
 }
 
-// GetUserByName
-func (us *userStore) GetUserByName(name, ownerId string) (*model.User, error) {
+// GetUserByName 获取用户
+func (us *userStore) GetUserByName(name, ownerId string) (*authcommon.User, error) {
 	if name == "" {
-		return nil, store.NewStatusError(store.EmptyParamsErr, "get user missing some params")
+		return nil, store.NewStatusError(store.EmptyParamsErr, "get user missing name params")
 	}
-
-	ret, err := us.handler.LoadValuesByFilter(tblUser, []string{UserFieldName, UserFieldOwner}, &userForStore{},
+	fields := []string{UserFieldName, UserFieldOwner, UserFieldValid}
+	ret, err := us.handler.LoadValuesByFilter(tblUser, fields, &userForStore{},
 		func(m map[string]interface{}) bool {
-
+			valid, ok := m[UserFieldValid].(bool)
+			if ok && !valid {
+				return false
+			}
 			saveName, _ := m[UserFieldName].(string)
 			saveOwner, _ := m[UserFieldOwner].(string)
-
 			return saveName == name && saveOwner == ownerId
 		})
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get user by name", zap.Error(err), zap.String("name", name),
+		log.Error("[Store][User] get user by name", zap.Error(err), zap.String("name", name),
 			zap.String("owner", ownerId))
 		return nil, err
 	}
@@ -265,7 +206,7 @@ func (us *userStore) GetUserByName(name, ownerId string) (*model.User, error) {
 		return nil, nil
 	}
 	if len(ret) > 1 {
-		return nil, MultipleUserFound
+		return nil, ErrMultipleUserFound
 	}
 
 	var id string
@@ -283,22 +224,21 @@ func (us *userStore) GetUserByName(name, ownerId string) (*model.User, error) {
 }
 
 // GetUserByIds 通过用户ID批量获取用户
-func (us *userStore) GetUserByIds(ids []string) ([]*model.User, error) {
+func (us *userStore) GetUserByIds(ids []string) ([]*authcommon.User, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 
 	ret, err := us.handler.LoadValues(tblUser, ids, &userForStore{})
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get user by ids", zap.Error(err), zap.Any("ids", ids))
+		log.Error("[Store][User] get user by ids", zap.Error(err), zap.Any("ids", ids))
 		return nil, err
 	}
 	if len(ret) == 0 {
 		return nil, nil
 	}
 
-	users := make([]*model.User, 0, len(ids))
-
+	users := make([]*authcommon.User, 0, len(ids))
 	for k := range ret {
 		user := ret[k].(*userForStore)
 		if !user.Valid {
@@ -311,10 +251,8 @@ func (us *userStore) GetUserByIds(ids []string) ([]*model.User, error) {
 }
 
 // GetSubCount 获取子账户的个数
-func (us *userStore) GetSubCount(user *model.User) (uint32, error) {
-
+func (us *userStore) GetSubCount(user *authcommon.User) (uint32, error) {
 	ownerId := user.ID
-
 	ret, err := us.handler.LoadValuesByFilter(tblUser, []string{UserFieldOwner, UserFieldValid}, &userForStore{},
 		func(m map[string]interface{}) bool {
 			valid, ok := m[UserFieldValid].(bool)
@@ -327,7 +265,7 @@ func (us *userStore) GetSubCount(user *model.User) (uint32, error) {
 		})
 
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get user sub count", zap.Error(err), zap.String("id", user.ID))
+		log.Error("[Store][User] get user sub count", zap.Error(err), zap.String("id", user.ID))
 		return 0, err
 	}
 
@@ -335,8 +273,7 @@ func (us *userStore) GetSubCount(user *model.User) (uint32, error) {
 }
 
 // GetUsers 获取用户列表
-func (us *userStore) GetUsers(filters map[string]string, offset uint32, limit uint32) (uint32, []*model.User, error) {
-
+func (us *userStore) GetUsers(filters map[string]string, offset uint32, limit uint32) (uint32, []*authcommon.User, error) {
 	if _, ok := filters["group_id"]; ok {
 		return us.getGroupUsers(filters, offset, limit)
 	}
@@ -348,10 +285,8 @@ func (us *userStore) GetUsers(filters map[string]string, offset uint32, limit ui
 // "name":   1,
 // "owner":  1,
 // "source": 1,
-func (us *userStore) getUsers(filters map[string]string, offset uint32, limit uint32) (uint32, []*model.User, error) {
-
+func (us *userStore) getUsers(filters map[string]string, offset uint32, limit uint32) (uint32, []*authcommon.User, error) {
 	fields := []string{UserFieldID, UserFieldName, UserFieldOwner, UserFieldSource, UserFieldValid, UserFieldType}
-
 	ret, err := us.handler.LoadValuesByFilter(tblUser, fields, &userForStore{},
 		func(m map[string]interface{}) bool {
 
@@ -367,13 +302,13 @@ func (us *userStore) getUsers(filters map[string]string, offset uint32, limit ui
 			saveType, _ := m[UserFieldType].(int64)
 
 			// 超级账户不做展示
-			if model.UserRoleType(saveType) == model.AdminUserRole &&
+			if authcommon.UserRoleType(saveType) == authcommon.AdminUserRole &&
 				strings.Compare("true", filters["hide_admin"]) == 0 {
 				return false
 			}
 
 			if name, ok := filters["name"]; ok {
-				if utils.IsWildName(name) {
+				if utils.IsPrefixWildName(name) {
 					if !strings.Contains(saveName, name[:len(name)-1]) {
 						return false
 					}
@@ -396,11 +331,17 @@ func (us *userStore) getUsers(filters map[string]string, offset uint32, limit ui
 				}
 			}
 
+			if queryId, ok := filters["id"]; ok {
+				if queryId != saveId {
+					return false
+				}
+			}
+
 			return true
 		})
 
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get users", zap.Error(err), zap.Any("filters", filters))
+		log.Error("[Store][User] get users", zap.Error(err), zap.Any("filters", filters))
 		return 0, nil, err
 	}
 	if len(ret) == 0 {
@@ -408,18 +349,18 @@ func (us *userStore) getUsers(filters map[string]string, offset uint32, limit ui
 	}
 
 	return uint32(len(ret)), doUserPage(ret, offset, limit), nil
-
 }
 
 // getGroupUsers 获取某个用户组下的所有用户列表数据信息
-func (us *userStore) getGroupUsers(filters map[string]string, offset uint32, limit uint32) (uint32, []*model.User, error) {
+func (us *userStore) getGroupUsers(filters map[string]string, offset uint32, limit uint32) (uint32,
+	[]*authcommon.User, error) {
 
 	groupId := filters["group_id"]
 	delete(filters, "group_id")
 
 	ret, err := us.handler.LoadValues(tblGroup, []string{groupId}, &groupForStore{})
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get user groups", zap.Error(err), zap.Any("filters", filters))
+		log.Error("[Store][User] get user groups", zap.Error(err), zap.Any("filters", filters))
 		return 0, nil, err
 	}
 	if len(ret) == 0 {
@@ -437,7 +378,7 @@ func (us *userStore) getGroupUsers(filters map[string]string, offset uint32, lim
 
 	ret, err = us.handler.LoadValues(tblUser, userIds, &userForStore{})
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get all users", zap.Error(err))
+		log.Error("[Store][User] get all users", zap.Error(err))
 		return 0, nil, err
 	}
 
@@ -446,12 +387,12 @@ func (us *userStore) getGroupUsers(filters map[string]string, offset uint32, lim
 			return false
 		}
 
-		if model.UserRoleType(user.Type) == model.AdminUserRole {
+		if authcommon.UserRoleType(user.Type) == authcommon.AdminUserRole {
 			return false
 		}
 
 		if name, ok := filters["name"]; ok {
-			if utils.IsWildName(name) {
+			if utils.IsPrefixWildName(name) {
 				if !strings.Contains(user.Name, name[:len(name)-1]) {
 					return false
 				}
@@ -488,8 +429,8 @@ func (us *userStore) getGroupUsers(filters map[string]string, offset uint32, lim
 	return uint32(len(ret)), doUserPage(users, offset, limit), err
 }
 
-// GetUsersForCache
-func (us *userStore) GetUsersForCache(mtime time.Time, firstUpdate bool) ([]*model.User, error) {
+// GetUsersForCache 获取所有用户信息
+func (us *userStore) GetUsersForCache(mtime time.Time, firstUpdate bool) ([]*authcommon.User, error) {
 	ret, err := us.handler.LoadValuesByFilter(tblUser, []string{UserFieldModifyTime}, &userForStore{},
 		func(m map[string]interface{}) bool {
 			mt := m[UserFieldModifyTime].(time.Time)
@@ -497,12 +438,11 @@ func (us *userStore) GetUsersForCache(mtime time.Time, firstUpdate bool) ([]*mod
 			return !isBefore
 		})
 	if err != nil {
-		logger.StoreScope().Error("[Store][User] get users for cache", zap.Error(err))
+		log.Error("[Store][User] get users for cache", zap.Error(err))
 		return nil, err
 	}
 
-	users := make([]*model.User, 0, len(ret))
-
+	users := make([]*authcommon.User, 0, len(ret))
 	for k := range ret {
 		val := ret[k]
 		users = append(users, converToUserModel(val.(*userForStore)))
@@ -512,10 +452,8 @@ func (us *userStore) GetUsersForCache(mtime time.Time, firstUpdate bool) ([]*mod
 }
 
 // doPage 进行分页
-func doUserPage(ret map[string]interface{}, offset, limit uint32) []*model.User {
-
-	users := make([]*model.User, 0, len(ret))
-
+func doUserPage(ret map[string]interface{}, offset, limit uint32) []*authcommon.User {
+	users := make([]*authcommon.User, 0, len(ret))
 	beginIndex := offset
 	endIndex := beginIndex + limit
 	totalCount := uint32(len(ret))
@@ -541,10 +479,9 @@ func doUserPage(ret map[string]interface{}, offset, limit uint32) []*model.User 
 	})
 
 	return users[beginIndex:endIndex]
-
 }
 
-func converToUserStore(user *model.User) *userForStore {
+func converToUserStore(user *authcommon.User) *userForStore {
 	return &userForStore{
 		ID:          user.ID,
 		Name:        user.Name,
@@ -558,31 +495,27 @@ func converToUserStore(user *model.User) *userForStore {
 		Comment:     user.Comment,
 		CreateTime:  user.CreateTime,
 		ModifyTime:  user.ModifyTime,
-		Email:       user.Email,
-		Mobile:      user.Mobile,
 	}
 }
 
-func converToUserModel(user *userForStore) *model.User {
-	return &model.User{
+func converToUserModel(user *userForStore) *authcommon.User {
+	return &authcommon.User{
 		ID:          user.ID,
 		Name:        user.Name,
 		Password:    user.Password,
 		Owner:       user.Owner,
 		Source:      user.Source,
-		Type:        model.UserRoleType(user.Type),
+		Type:        authcommon.UserRoleType(user.Type),
 		Token:       user.Token,
 		TokenEnable: user.TokenEnable,
 		Valid:       user.Valid,
 		Comment:     user.Comment,
 		CreateTime:  user.CreateTime,
 		ModifyTime:  user.ModifyTime,
-		Email:       user.Email,
-		Mobile:      user.Mobile,
 	}
 }
 
-func initUser(user *model.User) {
+func initUser(user *authcommon.User) {
 	if user != nil {
 		tn := time.Now()
 		user.Valid = true

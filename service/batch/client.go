@@ -22,9 +22,11 @@ import (
 	"errors"
 	"time"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/store"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+
+	"github.com/polarismesh/polaris/common/model"
+	commonstore "github.com/polarismesh/polaris/common/store"
+	"github.com/polarismesh/polaris/store"
 )
 
 // InstanceCtrl 批量操作实例的类
@@ -145,7 +147,7 @@ func (ctrl *ClientCtrl) mainLoop(ctx context.Context) {
 			case <-ticker.C:
 				triggerConsume(futures[0:idx])
 			case <-ctx.Done():
-				log.Infof("[Batch] %s main loop exited", ctrl.label)
+				log.Debugf("[Batch] %s main loop exited", ctrl.label)
 				return
 			}
 		}
@@ -156,7 +158,7 @@ func (ctrl *ClientCtrl) mainLoop(ctx context.Context) {
 // 从chan中获取数据，直接写数据库
 // 每次写完，设置协程为空闲
 func (ctrl *ClientCtrl) storeWorker(ctx context.Context, index int) {
-	log.Infof("[Batch][Client] %s worker(%d) running in main loop", ctrl.label, index)
+	log.Debugf("[Batch][Client] %s worker(%d) running in main loop", ctrl.label, index)
 	// store协程启动，先把自己注册到idle中
 	ctrl.idleStoreThread <- index
 	// 主循环
@@ -193,11 +195,11 @@ func (ctrl *ClientCtrl) registerHandler(futures []*ClientFuture) error {
 		clients = append(clients, model.NewClient(entry.request))
 	}
 	if err := ctrl.storage.BatchAddClients(clients); err != nil {
-		SendClientReply(futures, StoreCode2APICode(err), err)
+		SendClientReply(futures, commonstore.StoreCode2APICode(err), err)
 		return err
 	}
 
-	SendClientReply(futures, api.ExecuteSuccess, nil)
+	SendClientReply(futures, apimodel.Code_ExecuteSuccess, nil)
 	return nil
 }
 
@@ -219,10 +221,10 @@ func (ctrl *ClientCtrl) deregisterHandler(futures []*ClientFuture) error {
 		clients = append(clients, id)
 	}
 	if err := ctrl.storage.BatchDeleteClients(clients); err != nil {
-		SendClientReply(futures, StoreCode2APICode(err), err)
+		SendClientReply(futures, commonstore.StoreCode2APICode(err), err)
 		return err
 	}
 
-	SendClientReply(futures, api.ExecuteSuccess, nil)
+	SendClientReply(futures, apimodel.Code_ExecuteSuccess, nil)
 	return nil
 }

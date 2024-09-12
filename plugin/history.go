@@ -21,13 +21,13 @@ import (
 	"os"
 	"sync"
 
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 var (
-	// 插件初始化原子变量
-	historyOnce = &sync.Once{}
+	// historyOnce Plugin initialization atomic variable
+	historyOnce      sync.Once
+	compositeHistory *CompositeHistory
 )
 
 // History 历史记录插件
@@ -36,20 +36,83 @@ type History interface {
 	Record(entry *model.RecordEntry)
 }
 
-// GetHistory 获取历史记录插件
+// GetHistory Get the historical record plugin
 func GetHistory() History {
-	c := &config.History
-	plugin, exist := pluginSet[c.Name]
-	if !exist {
-		return nil
+	if compositeHistory != nil {
+		return compositeHistory
 	}
 
 	historyOnce.Do(func() {
-		if err := plugin.Initialize(c); err != nil {
-			log.Errorf("plugin init err: %s", err.Error())
+		var (
+			entries []ConfigEntry
+		)
+
+		if len(config.History.Entries) != 0 {
+			entries = append(entries, config.History.Entries...)
+		} else {
+			entries = append(entries, ConfigEntry{
+				Name:   config.History.Name,
+				Option: config.History.Option,
+			})
+		}
+
+		compositeHistory = &CompositeHistory{
+			chain:   make([]History, 0, len(entries)),
+			options: entries,
+		}
+
+		if err := compositeHistory.Initialize(nil); err != nil {
+			log.Errorf("History plugin init err: %s", err.Error())
 			os.Exit(-1)
 		}
 	})
 
-	return plugin.(History)
+	return compositeHistory
+}
+
+type CompositeHistory struct {
+	chain   []History
+	options []ConfigEntry
+}
+
+func (c *CompositeHistory) Name() string {
+	return "CompositeHistory"
+}
+
+func (c *CompositeHistory) Initialize(config *ConfigEntry) error {
+	for i := range c.options {
+		entry := c.options[i]
+		item, exist := pluginSet[entry.Name]
+		if !exist {
+			log.Errorf("plugin History not found target: %s", entry.Name)
+			continue
+		}
+
+		history, ok := item.(History)
+		if !ok {
+			log.Errorf("plugin target: %s not History", entry.Name)
+			continue
+		}
+
+		if err := history.Initialize(&entry); err != nil {
+			return err
+		}
+		c.chain = append(c.chain, history)
+	}
+	return nil
+}
+
+func (c *CompositeHistory) Destroy() error {
+	for i := range c.chain {
+		if err := c.chain[i].Destroy(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *CompositeHistory) Record(entry *model.RecordEntry) {
+	for i := range c.chain {
+		c.chain[i].Record(entry)
+	}
 }

@@ -19,57 +19,22 @@ package healthcheck
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/service/batch"
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/service/batch"
+	"github.com/polarismesh/polaris/store"
 )
 
-func TestInitialize(ctx context.Context, hcOpt *Config, cacheOpen bool, bc *batch.Controller, storage store.Store) (*Server, error) {
-	testServer := new(Server)
-
-	if !hcOpt.Open {
-		return nil, errors.New("healthcheck not open")
-	}
-	if !cacheOpen {
-		return nil, fmt.Errorf("[healthcheck]cache not open")
-	}
+func TestInitialize(ctx context.Context, hcOpt *Config, bc *batch.Controller,
+	storage store.Store) (*Server, error) {
 	hcOpt.SetDefault()
-	if len(hcOpt.Checkers) > 0 {
-		testServer.checkers = make(map[int32]plugin.HealthChecker, len(hcOpt.Checkers))
-		for _, entry := range hcOpt.Checkers {
-			checker := plugin.GetHealthChecker(entry.Name, &entry)
-			if checker == nil {
-				return nil, fmt.Errorf("[healthcheck]unknown healthchecker %s", entry.Name)
-			}
-			// The same health type check plugin can only exist in one
-			_, exist := testServer.checkers[int32(checker.Type())]
-			if exist {
-				return nil, fmt.Errorf("[healthcheck]duplicate healthchecker %s, checkType %d", entry.Name, checker.Type())
-			}
-
-			testServer.checkers[int32(checker.Type())] = checker
-		}
+	testServer, err := NewHealthServer(ctx, hcOpt,
+		WithStore(storage),
+		WithBatchController(bc),
+		WithTimeAdjuster(newTimeAdjuster(ctx, storage)),
+	)
+	if err != nil {
+		return nil, err
 	}
-
-	testServer.storage = storage
-	testServer.bc = bc
-
-	testServer.localHost = hcOpt.LocalHost
-	testServer.history = plugin.GetHistory()
-	testServer.discoverEvent = plugin.GetDiscoverEvent()
-
-	testServer.cacheProvider = newCacheProvider(hcOpt.Service, testServer)
-	testServer.timeAdjuster = newTimeAdjuster(ctx, storage)
-	testServer.checkScheduler = newCheckScheduler(ctx, hcOpt.SlotNum, hcOpt.MinCheckInterval, hcOpt.MaxCheckInterval)
-	testServer.dispatcher = newDispatcher(ctx, testServer)
-
-	testServer.discoverCh = make(chan eventWrapper, 32)
-	go testServer.receiveEventAndPush()
-
 	finishInit = true
-
-	return testServer, nil
+	return testServer, testServer.run(ctx)
 }

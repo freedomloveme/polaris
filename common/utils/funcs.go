@@ -18,76 +18,17 @@
 package utils
 
 import (
+	"context"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 
 	"github.com/google/uuid"
-
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 )
 
-// CreateInstanceModel 创建存储层服务实例模型
-func CreateInstanceModel(serviceID string, req *api.Instance) *model.Instance {
-	// 默认为健康的
-	healthy := true
-	if req.GetHealthy() != nil {
-		healthy = req.GetHealthy().GetValue()
-	}
-
-	// 默认为不隔离的
-	isolate := false
-	if req.GetIsolate() != nil {
-		isolate = req.GetIsolate().GetValue()
-	}
-
-	// 权重默认是100
-	var weight uint32 = 100
-	if req.GetWeight() != nil {
-		weight = req.GetWeight().GetValue()
-	}
-
-	instance := &model.Instance{
-		ServiceID: serviceID,
-	}
-
-	protoIns := &api.Instance{
-		Id:       req.GetId(),
-		Host:     NewStringValue(strings.TrimSpace(req.GetHost().GetValue())),
-		VpcId:    req.GetVpcId(),
-		Port:     req.GetPort(),
-		Protocol: req.GetProtocol(),
-		Version:  req.GetVersion(),
-		Priority: req.GetPriority(),
-		Weight:   NewUInt32Value(weight),
-		Healthy:  NewBoolValue(healthy),
-		Isolate:  NewBoolValue(isolate),
-		Location: req.Location,
-		Metadata: req.Metadata,
-		LogicSet: req.GetLogicSet(),
-		Revision: NewStringValue(NewUUID()), // 更新版本号
-	}
-
-	// health Check，healthCheck不能为空，且没有显示把enable_health_check置为false
-	// 如果create的时候，打开了healthCheck，那么实例模式是unhealthy，必须要一次心跳才会healthy
-	if req.GetHealthCheck().GetHeartbeat() != nil &&
-		(req.GetEnableHealthCheck() == nil || req.GetEnableHealthCheck().GetValue()) {
-		protoIns.EnableHealthCheck = NewBoolValue(true)
-		protoIns.HealthCheck = req.HealthCheck
-		protoIns.HealthCheck.Type = api.HealthCheck_HEARTBEAT
-		// ttl range: (0, 60]
-		ttl := protoIns.GetHealthCheck().GetHeartbeat().GetTtl().GetValue()
-		if ttl == 0 || ttl > 60 {
-			if protoIns.HealthCheck.Heartbeat.Ttl == nil {
-				protoIns.HealthCheck.Heartbeat.Ttl = NewUInt32Value(5)
-			}
-			protoIns.HealthCheck.Heartbeat.Ttl.Value = 5
-		}
-	}
-
-	instance.Proto = protoIns
-	return instance
-}
+var emptyVal = struct{}{}
 
 // ConvertFilter map[string]string to  map[string][]string
 func ConvertFilter(filters map[string]string) map[string][]string {
@@ -107,15 +48,84 @@ func CollectMapKeys(filters map[string]string) []string {
 	fields := make([]string, 0, len(filters))
 	for k := range filters {
 		fields = append(fields, k)
+		if k != "" {
+			fields = append(fields, strings.ToUpper(string(k[:1]))+k[1:])
+		}
 	}
 
 	return fields
 }
 
-// IsWildName 判断名字是否为通配名字，只支持前缀索引(名字最后为*)
-func IsWildName(name string) bool {
+// IsPrefixWildName 判断名字是否为通配名字，只支持前缀索引(名字最后为*)
+func IsPrefixWildName(name string) bool {
 	length := len(name)
 	return length >= 1 && name[length-1:length] == "*"
+}
+
+// IsWildName 判断名字是否为通配名字，前缀或者后缀
+func IsWildName(name string) bool {
+	return IsPrefixWildName(name) || IsSuffixWildName(name)
+}
+
+// ParseWildNameForSql 如果 name 是通配字符串，将通配字符*替换为sql中的%
+func ParseWildNameForSql(name string) string {
+	if IsPrefixWildName(name) {
+		name = name[:len(name)-1] + "%"
+	}
+	if IsSuffixWildName(name) {
+		name = "%" + name[1:]
+	}
+	return name
+}
+
+// IsSuffixWildName 判断名字是否为通配名字，只支持后缀索引(名字第一个字符为*)
+func IsSuffixWildName(name string) bool {
+	length := len(name)
+	return length >= 1 && name[0:1] == "*"
+}
+
+// ParseWildName 判断是否为格式化查询条件并且返回真正的查询信息
+func ParseWildName(name string) (string, bool) {
+	length := len(name)
+	ok := length >= 1 && name[length-1:length] == "*"
+
+	if ok {
+		return name[:len(name)-1], ok
+	}
+
+	return name, false
+}
+
+// IsWildMatchIgnoreCase 判断 name 是否匹配 pattern，pattern 可以是前缀或者后缀，忽略大小写
+func IsWildMatchIgnoreCase(name, pattern string) bool {
+	return IsWildMatch(strings.ToLower(name), strings.ToLower(pattern))
+}
+
+// IsWildNotMatch .
+func IsWildNotMatch(name, pattern string) bool {
+	return !IsWildMatch(name, pattern)
+}
+
+// IsWildMatch 判断 name 是否匹配 pattern，pattern 可以是前缀或者后缀
+func IsWildMatch(name, pattern string) bool {
+	if IsPrefixWildName(pattern) {
+		pattern = strings.TrimRight(pattern, "*")
+		if strings.HasPrefix(name, pattern) {
+			return true
+		}
+		if IsSuffixWildName(pattern) {
+			pattern = strings.TrimLeft(pattern, "*")
+			return strings.Contains(name, pattern)
+		}
+		return false
+	} else if IsSuffixWildName(pattern) {
+		pattern = strings.TrimLeft(pattern, "*")
+		if strings.HasSuffix(name, pattern) {
+			return true
+		}
+		return false
+	}
+	return pattern == name
 }
 
 // NewUUID 返回一个随机的UUID
@@ -124,7 +134,24 @@ func NewUUID() string {
 	return hex.EncodeToString(uuidBytes[:])
 }
 
-var emptyVal = struct{}{}
+// NewUUID 返回一个随机的UUID
+func NewRoutingV2UUID() string {
+	uuidBytes := uuid.New()
+	return hex.EncodeToString(uuidBytes[:])
+}
+
+// NewV2Revision 返回一个随机的UUID
+func NewV2Revision() string {
+	uuidBytes := uuid.New()
+	return "v2-" + hex.EncodeToString(uuidBytes[:])
+}
+
+func DefaultString(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
+}
 
 // StringSliceDeDuplication 字符切片去重
 func StringSliceDeDuplication(s []string) []string {
@@ -138,4 +165,100 @@ func StringSliceDeDuplication(s []string) []string {
 	}
 
 	return res
+}
+
+func MustJson(v interface{}) string {
+	data, err := json.Marshal(v)
+	_ = err
+	return string(data)
+}
+
+// IsNotEqualMap metadata need update
+func IsNotEqualMap(req map[string]string, old map[string]string) bool {
+	if req == nil {
+		return false
+	}
+
+	if len(req) != len(old) {
+		return true
+	}
+
+	needUpdate := false
+	for key, value := range req {
+		oldValue, ok := old[key]
+		if !ok {
+			needUpdate = true
+			break
+		}
+		if value != oldValue {
+			needUpdate = true
+			break
+		}
+	}
+	if needUpdate {
+		return needUpdate
+	}
+
+	for key, value := range old {
+		newValue, ok := req[key]
+		if !ok {
+			needUpdate = true
+			break
+		}
+		if value != newValue {
+			needUpdate = true
+			break
+		}
+	}
+
+	return needUpdate
+}
+
+// ConvertGRPCContext 将GRPC上下文转换成内部上下文
+func ConvertGRPCContext(ctx context.Context) context.Context {
+	var requestID, userAgent, token string
+
+	meta, exist := metadata.FromIncomingContext(ctx)
+	if exist {
+		ids := meta["request-id"]
+		if len(ids) > 0 {
+			requestID = ids[0]
+		}
+		agents := meta["user-agent"]
+		if len(agents) > 0 {
+			userAgent = agents[0]
+		}
+		if tokens := meta["x-polaris-token"]; len(tokens) > 0 {
+			token = tokens[0]
+		}
+	} else {
+		meta = metadata.MD{}
+	}
+
+	var (
+		clientIP = ""
+		address  = ""
+	)
+	if pr, ok := peer.FromContext(ctx); ok && pr.Addr != nil {
+		address = pr.Addr.String()
+		addrSlice := strings.Split(address, ":")
+		if len(addrSlice) == 2 {
+			clientIP = addrSlice[0]
+		}
+	}
+
+	ctx = context.Background()
+	ctx = context.WithValue(ctx, ContextGrpcHeader, meta)
+	ctx = context.WithValue(ctx, ContextRequestHeaders, meta)
+	ctx = context.WithValue(ctx, StringContext("request-id"), requestID)
+	ctx = context.WithValue(ctx, StringContext("client-ip"), clientIP)
+	ctx = context.WithValue(ctx, ContextClientAddress, address)
+	ctx = context.WithValue(ctx, StringContext("user-agent"), userAgent)
+	ctx = context.WithValue(ctx, ContextAuthTokenKey, token)
+
+	return ctx
+}
+
+func BoolPtr(v bool) *bool {
+	return &v
 }

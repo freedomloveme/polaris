@@ -29,47 +29,18 @@ const (
 	AuthLoggerName = "auth"
 	// StoreLoggerName store logger name, can use FindScope function to get the logger
 	StoreLoggerName = "store"
-)
-
-var (
-	namingScope = RegisterScope(NamingLoggerName, "naming logging messages.", 0)
-	configScope = RegisterScope(ConfigLoggerName, "naming logging messages.", 0)
-	cacheScope  = RegisterScope(CacheLoggerName, "naming logging messages.", 0)
-	authScope   = RegisterScope(AuthLoggerName, "naming logging messages.", 0)
-	storeScope  = RegisterScope(StoreLoggerName, "store logging messages.", 0)
+	// APIServerLoggerName apiserver logger name, can use FindScope function to get the logger
+	APIServerLoggerName = "apiserver"
+	// XDSLoggerName xdsv3 logger name, can use FindScope function to get the logger
+	XDSLoggerName = "xdsv3"
+	// HealthcheckLoggerName healthcheck logger name, can use FindScope function to get the logger
+	HealthcheckLoggerName = "healthcheck"
+	// SystemOperationLoggerName system operation logger name, can use FindScope function to get the logger
+	SystemOperationLoggerName = "sysop"
 )
 
 func allLoggerTypes() []string {
 	return []string{NamingLoggerName, ConfigLoggerName, CacheLoggerName,
-		AuthLoggerName, StoreLoggerName, DefaultLoggerName}
-}
-
-// DefaultScope default logging scope handler
-func DefaultScope() *Scope {
-	return defaultScope
-}
-
-// NamingScope naming logging scope handler
-func NamingScope() *Scope {
-	return namingScope
-}
-
-// ConfigScope config logging scope handler
-func ConfigScope() *Scope {
-	return configScope
-}
-
-// CacheScope cache logging scope handler
-func CacheScope() *Scope {
-	return cacheScope
-}
-
-// AuthScope auth logging scope handler
-func AuthScope() *Scope {
-	return authScope
-}
-
-// StoreScope store logging scope handler
-func StoreScope() *Scope {
-	return storeScope
+		AuthLoggerName, StoreLoggerName, APIServerLoggerName, XDSLoggerName,
+		HealthcheckLoggerName, SystemOperationLoggerName, DefaultLoggerName}
 }

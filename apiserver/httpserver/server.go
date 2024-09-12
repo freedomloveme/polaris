@@ -20,29 +20,50 @@ package httpserver
 import (
 	"context"
 	"fmt"
-	"github.com/polarismesh/polaris-server/common/secure"
 	"net"
 	"net/http"
-	"net/http/pprof"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/emicklei/go-restful"
+	restful "github.com/emicklei/go-restful/v3"
+	"github.com/gogo/protobuf/jsonpb"
 	"github.com/pkg/errors"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	"github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
 
-	"github.com/polarismesh/polaris-server/apiserver"
-	"github.com/polarismesh/polaris-server/auth"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/connlimit"
-	"github.com/polarismesh/polaris-server/common/utils"
-	"github.com/polarismesh/polaris-server/config"
-	"github.com/polarismesh/polaris-server/maintain"
-	"github.com/polarismesh/polaris-server/namespace"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/plugin/statis/local"
-	"github.com/polarismesh/polaris-server/service"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
+	"github.com/polarismesh/polaris/admin"
+	"github.com/polarismesh/polaris/apiserver"
+	confighttp "github.com/polarismesh/polaris/apiserver/httpserver/config"
+	v1 "github.com/polarismesh/polaris/apiserver/httpserver/discover/v1"
+	v2 "github.com/polarismesh/polaris/apiserver/httpserver/discover/v2"
+	httpcommon "github.com/polarismesh/polaris/apiserver/httpserver/utils"
+	"github.com/polarismesh/polaris/auth"
+	api "github.com/polarismesh/polaris/common/api/v1"
+	"github.com/polarismesh/polaris/common/conn/keepalive"
+	connlimit "github.com/polarismesh/polaris/common/conn/limit"
+	commonlog "github.com/polarismesh/polaris/common/log"
+	"github.com/polarismesh/polaris/common/metrics"
+	"github.com/polarismesh/polaris/common/secure"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/config"
+	"github.com/polarismesh/polaris/namespace"
+	"github.com/polarismesh/polaris/plugin"
+	"github.com/polarismesh/polaris/service"
+	"github.com/polarismesh/polaris/service/healthcheck"
+)
+
+var (
+	cacheTypes = map[string]struct{}{
+		apiservice.DiscoverResponse_INSTANCE.String():        {},
+		apiservice.DiscoverResponse_ROUTING.String():         {},
+		apiservice.DiscoverResponse_RATE_LIMIT.String():      {},
+		apiservice.DiscoverResponse_CIRCUIT_BREAKER.String(): {},
+		apiservice.DiscoverResponse_FAULT_DETECTOR.String():  {},
+		apiservice.DiscoverResponse_SERVICES.String():        {},
+	}
 )
 
 // HTTPServer HTTP API服务器
@@ -57,24 +78,34 @@ type HTTPServer struct {
 	restart         bool
 	exitCh          chan struct{}
 
-	enablePprof bool
+	enablePprof   *atomic.Bool
+	enableSwagger bool
 
 	server            *http.Server
-	maintainServer    maintain.MaintainOperateServer
+	maintainServer    admin.AdminOperateServer
 	namespaceServer   namespace.NamespaceOperateServer
 	namingServer      service.DiscoverServer
 	configServer      config.ConfigCenterServer
 	healthCheckServer *healthcheck.Server
 	rateLimit         plugin.Ratelimit
 	statis            plugin.Statis
-	auth              plugin.Auth
+	whitelist         plugin.Whitelist
 
-	authServer auth.AuthServer
+	discoverV1 v1.HTTPServerV1
+	discoverV2 v2.HTTPServerV2
+	configSvr  confighttp.HTTPServer
+
+	userMgn     auth.UserServer
+	strategyMgn auth.StrategyServer
+
+	// apiserverSlots
+	apiserverSlots map[string]apiserver.Apiserver
 }
 
 const (
 	// Discover discover string
-	Discover string = "Discover"
+	Discover               string = "Discover"
+	defaultAlivePeriodTime        = 3 * time.Minute
 )
 
 // GetPort 获取端口
@@ -88,13 +119,18 @@ func (h *HTTPServer) GetProtocol() string {
 }
 
 // Initialize 初始化HTTP API服务器
-func (h *HTTPServer) Initialize(_ context.Context, option map[string]interface{},
-	api map[string]apiserver.APIConfig) error {
+func (h *HTTPServer) Initialize(ctx context.Context, option map[string]interface{},
+	apiConf map[string]apiserver.APIConfig) error {
 	h.option = option
-	h.openAPI = api
+	h.openAPI = apiConf
 	h.listenIP = option["listenIP"].(string)
 	h.listenPort = uint32(option["listenPort"].(int))
-	h.enablePprof, _ = option["enablePprof"].(bool)
+	h.enablePprof = &atomic.Bool{}
+	if val, _ := option["enablePprof"].(bool); val {
+		h.enablePprof.Store(true)
+	}
+	h.enableSwagger, _ = option["enableSwagger"].(bool)
+	h.apiserverSlots, _ = ctx.Value(utils.ContextAPIServerSlot{}).(map[string]apiserver.Apiserver)
 	// 连接数限制的配置
 	if raw, _ := option["connLimit"].(map[interface{}]interface{}); raw != nil {
 		connLimitConfig, err := connlimit.ParseConnLimitConfig(raw)
@@ -108,9 +144,17 @@ func (h *HTTPServer) Initialize(_ context.Context, option map[string]interface{}
 		h.rateLimit = rateLimit
 	}
 
-	if auth := plugin.GetAuth(); auth != nil {
-		log.Infof("http server open the auth")
-		h.auth = auth
+	if whitelist := plugin.GetWhitelist(); whitelist != nil {
+		log.Infof("http server open the whitelist")
+		h.whitelist = whitelist
+	}
+
+	if raw, _ := option["enableCacheProto"].(bool); raw {
+		types := make([]string, 0, len(cacheTypes))
+		for k := range cacheTypes {
+			types = append(types, k)
+		}
+		httpcommon.InitProtoCache(option, types, discoverCacheConvert)
 	}
 
 	// tls 配置信息
@@ -120,12 +164,13 @@ func (h *HTTPServer) Initialize(_ context.Context, option map[string]interface{}
 			return err
 		}
 		h.tlsInfo = &secure.TLSInfo{
-			CertFile:      tlsConfig.Cert,
-			KeyFile:       tlsConfig.Key,
-			TrustedCAFile: tlsConfig.CaCert,
+			CertFile:      tlsConfig.CertFile,
+			KeyFile:       tlsConfig.KeyFile,
+			TrustedCAFile: tlsConfig.TrustedCAFile,
 		}
 	}
 
+	metrics.SetMetricsPort(int32(h.listenPort))
 	return nil
 }
 
@@ -141,7 +186,7 @@ func (h *HTTPServer) Run(errCh chan error) {
 
 	var err error
 
-	h.maintainServer, err = maintain.GetServer()
+	h.maintainServer, err = admin.GetServer()
 	if err != nil {
 		log.Errorf("%v", err)
 		errCh <- err
@@ -164,14 +209,22 @@ func (h *HTTPServer) Run(errCh chan error) {
 		return
 	}
 
-	authSvr, err := auth.GetAuthServer()
+	userMgn, err := auth.GetUserServer()
 	if err != nil {
 		log.Errorf("%v", err)
 		errCh <- err
 		return
 	}
 
-	h.authServer = authSvr
+	strategyMgn, err := auth.GetStrategyServer()
+	if err != nil {
+		log.Errorf("%v", err)
+		errCh <- err
+		return
+	}
+
+	h.userMgn = userMgn
+	h.strategyMgn = strategyMgn
 
 	h.healthCheckServer, err = healthcheck.GetServer()
 	if err != nil {
@@ -188,6 +241,10 @@ func (h *HTTPServer) Run(errCh chan error) {
 		errCh <- err
 		return
 	}
+
+	h.discoverV1 = *v1.NewV1Server(h.namespaceServer, h.namingServer, h.healthCheckServer)
+	h.discoverV2 = *v2.NewV2Server(h.namespaceServer, h.namingServer, h.healthCheckServer)
+	h.configSvr = *confighttp.NewServer(h.maintainServer, h.namespaceServer, h.configServer)
 
 	// 初始化http server
 	address := fmt.Sprintf("%v:%v", h.listenIP, h.listenPort)
@@ -208,7 +265,7 @@ func (h *HTTPServer) Run(errCh chan error) {
 		return
 	}
 
-	ln = &tcpKeepAliveListener{ln.(*net.TCPListener)}
+	ln = keepalive.NewTcpKeepAliveListener(defaultAlivePeriodTime, ln.(*net.TCPListener))
 	// 开启最大连接数限制
 	if h.connLimitConfig != nil && h.connLimitConfig.OpenConnLimit {
 		log.Infof("http server use max connection limit per ip: %d, http max limit: %d",
@@ -246,15 +303,21 @@ func (h *HTTPServer) Stop() {
 	// 释放connLimit的数据，如果没有开启，也需要执行一下
 	// 目的：防止restart的时候，connLimit冲突
 	connlimit.RemoveLimitListener(h.GetProtocol())
+	// stop http server
 	if h.server != nil {
-		_ = h.server.Close()
+		// 延迟三秒，等待http server关闭，做到流量无损。
+		// 在此之前已经建立的链接，会正常执行业务，若执行时长超过3秒，则会抛出异常。
+		// 若是在3秒内提前处理完所有请求，h.server会提前关闭。
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := h.server.Shutdown(ctx); nil != err {
+			log.Errorf("httpserver shutdown failed, err: %v\n", err)
+		}
 	}
-
-	h.StopConfigServer()
 }
 
 // Restart restart server
-func (h *HTTPServer) Restart(option map[string]interface{}, api map[string]apiserver.APIConfig,
+func (h *HTTPServer) Restart(option map[string]interface{}, apiConf map[string]apiserver.APIConfig,
 	errCh chan error) error {
 	log.Infof("restart httpserver new config: %+v", option)
 	// 备份一下option
@@ -274,7 +337,7 @@ func (h *HTTPServer) Restart(option map[string]interface{}, api map[string]apise
 	log.Infof("old httpserver has stopped, begin restart httpserver")
 
 	ctx := context.Background()
-	if err := h.Initialize(ctx, option, api); err != nil {
+	if err := h.Initialize(ctx, option, apiConf); err != nil {
 		h.restart = false
 		if initErr := h.Initialize(ctx, backupOption, backupAPI); initErr != nil {
 			log.Errorf("start httpserver with backup cfg err: %s", initErr.Error())
@@ -295,98 +358,142 @@ func (h *HTTPServer) Restart(option map[string]interface{}, api map[string]apise
 // createRestfulContainer create handler
 func (h *HTTPServer) createRestfulContainer() (*restful.Container, error) {
 	wsContainer := restful.NewContainer()
+	wsContainer.RecoverHandler(h.recoverFunc)
 
 	// 增加CORS TODO
 	cors := restful.CrossOriginResourceSharing{
 		// ExposeHeaders:  []string{"X-My-Header"},
 		AllowedHeaders: []string{"Content-Type", "Accept", "Request-Id"},
-		AllowedMethods: []string{"GET", "POST", "PUT"},
+		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut},
 		CookiesAllowed: false,
 		Container:      wsContainer}
 	wsContainer.Filter(cors.Filter)
 
-	// Add container filter to respond to OPTIONS
+	// Incr container filter to respond to OPTIONS
 	wsContainer.Filter(wsContainer.OPTIONSFilter)
 
 	wsContainer.Filter(h.process)
 
-	for name, config := range h.openAPI {
+	for name, apiConfig := range h.openAPI {
 		switch name {
 		case "admin":
-			if config.Enable {
-				wsContainer.Add(h.GetAdminServer())
-				wsContainer.Add(h.GetMaintainAccessServer())
+			if apiConfig.Enable {
+				wsContainer.Add(h.GetIndexServer())
+				wsContainer.Add(h.GetAdminAccessServer())
 			}
 		case "console":
-			if config.Enable {
-				namingService, err := h.GetNamingConsoleAccessServer(config.Include)
+			if apiConfig.Enable {
+				namingServiceV1, err := h.discoverV1.GetConsoleAccessServer(apiConfig.Include)
 				if err != nil {
 					return nil, err
 				}
-				wsContainer.Add(namingService)
+				wsContainer.Add(namingServiceV1)
+
+				namingServiceV2, err := h.discoverV2.GetConsoleAccessServer(apiConfig.Include)
+				if err != nil {
+					return nil, err
+				}
+				wsContainer.Add(namingServiceV2)
+
+				configService, err := h.configSvr.GetConsoleAccessServer(apiConfig.Include)
+				if err != nil {
+					return nil, err
+				}
+				wsContainer.Add(configService)
 
 				ws := new(restful.WebService)
 				ws.Path("/core/v1").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
-
-				if err := h.GetCoreConsoleAccessServer(ws, config.Include); err != nil {
+				if err := h.GetClientServer(ws); err != nil {
+					return nil, err
+				}
+				if err := h.GetCoreV1ConsoleAccessServer(ws, apiConfig.Include); err != nil {
 					return nil, err
 				}
 				if err := h.GetAuthServer(ws); err != nil {
 					return nil, err
 				}
 
+				prometheusSvc, err := h.GetPrometheusDiscoveryServer(apiConfig.Include)
+				if err != nil {
+					return nil, err
+				}
+				wsContainer.Add(prometheusSvc)
+
 				wsContainer.Add(ws)
 			}
 		case "client":
-			if config.Enable {
-				service, err := h.GetClientAccessServer(config.Include)
-				if err != nil {
+			if apiConfig.Enable {
+				ws := new(restful.WebService)
+				ws.Path("/v1").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+
+				if err := h.discoverV1.GetClientAccessServer(ws, apiConfig.Include); err != nil {
 					return nil, err
 				}
-				wsContainer.Add(service)
-			}
-		case "config":
-			if config.Enable {
-				consoleService, err := h.GetConfigAccessServer(config.Include)
-				if err != nil {
+				if err := h.configSvr.GetClientAccessServer(ws, apiConfig.Include); err != nil {
 					return nil, err
 				}
-				wsContainer.Add(consoleService)
+				wsContainer.Add(ws)
 			}
 		default:
-			log.Errorf("api %s does not exist in httpserver", name)
-			return nil, fmt.Errorf("api %s does not exist in httpserver", name)
+			log.Warnf("api %s does not exist in httpserver", name)
 		}
 	}
 
-	if h.enablePprof {
-		h.enablePprofAccess(wsContainer)
-	}
-
-	statis := plugin.GetStatis()
-	if _, ok := statis.(*local.StatisWorker); ok {
-		h.enablePrometheusAccess(wsContainer)
-	}
-
+	h.enablePprofAccess(wsContainer)
+	h.enableSwaggerAPI(wsContainer)
+	// 收集插件的 endpoint 数据
+	h.enablePluginDebugAccess(wsContainer)
+	h.enablePrometheusAccess(wsContainer)
 	return wsContainer, nil
 }
 
-// enablePprofAccess 开启pprof接口
-func (h *HTTPServer) enablePprofAccess(wsContainer *restful.Container) {
-	log.Infof("open http access for pprof")
-	wsContainer.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
-	wsContainer.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
-	wsContainer.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
-	wsContainer.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
-}
+// enablePluginDebugAccess .
+func (h *HTTPServer) enablePluginDebugAccess(wsContainer *restful.Container) {
+	log.Infof("open http access for plugin")
 
-// enablePrometheusAccess 开启 Prometheus 接口
-func (h *HTTPServer) enablePrometheusAccess(wsContainer *restful.Container) {
-	log.Infof("open http access for prometheus")
+	wsContainer.Handle("/debug/endpoints", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		endpints := make([]map[string]string, 0, 8)
+		for _, checker := range h.healthCheckServer.Checkers() {
+			handlers := checker.DebugHandlers()
+			for i := range handlers {
+				endpints = append(endpints, map[string]string{
+					"path": handlers[i].Path,
+					"desc": handlers[i].Desc,
+				})
+			}
+		}
 
-	statics := plugin.GetStatis().(*local.StatisWorker)
+		for _, item := range h.apiserverSlots {
+			if val, ok := item.(apiserver.EnrichApiserver); ok {
+				handlers := val.DebugHandlers()
+				for i := range handlers {
+					endpints = append(endpints, map[string]string{
+						"path": handlers[i].Path,
+						"desc": handlers[i].Desc,
+					})
+				}
+			}
+		}
 
-	wsContainer.Handle("/metrics", statics.GetPrometheusHandler())
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(utils.MustJson(endpints)))
+	}))
+
+	for _, checker := range h.healthCheckServer.Checkers() {
+		handlers := checker.DebugHandlers()
+		for i := range handlers {
+			wsContainer.Handle(handlers[i].Path, handlers[i].Handler)
+		}
+	}
+
+	for _, item := range h.apiserverSlots {
+		if val, ok := item.(apiserver.EnrichApiserver); ok {
+			handlers := val.DebugHandlers()
+			for i := range handlers {
+				wsContainer.Handle(handlers[i].Path, handlers[i].Handler)
+			}
+		}
+	}
 }
 
 // process 在接收和回复时统一处理请求
@@ -420,7 +527,7 @@ func (h *HTTPServer) preprocess(req *restful.Request, rsp *restful.Response) err
 		log.Info("receive request",
 			zap.String("client-address", req.Request.RemoteAddr),
 			zap.String("user-agent", req.HeaderParameter("User-Agent")),
-			zap.String("request-id", requestID),
+			utils.ZapRequestID(requestID),
 			zap.String("platform-id", platformID),
 			zap.String("method", req.Request.Method),
 			zap.String("url", requestURL),
@@ -457,19 +564,25 @@ func (h *HTTPServer) postProcess(req *restful.Request, rsp *restful.Response) {
 	code, ok := req.Attribute(utils.PolarisCode).(uint32)
 
 	recordApiCall := true
-
 	if !ok {
 		code = uint32(rsp.StatusCode())
-		recordApiCall = code != http.StatusNotFound
+		recordApiCall = code != http.StatusNotFound && code != http.StatusMethodNotAllowed
 	}
 
 	diff := now.Sub(startTime)
 	// 打印耗时超过1s的请求
 	if diff > time.Second {
-		log.Info("handling time > 1s",
+		var scope *commonlog.Scope
+		if strings.Contains(path, "naming") {
+			scope = namingLog
+		} else {
+			scope = configLog
+		}
+
+		scope.Info("handling time > 1s",
 			zap.String("client-address", req.Request.RemoteAddr),
 			zap.String("user-agent", req.HeaderParameter("User-Agent")),
-			zap.String("request-id", req.HeaderParameter("Request-Id")),
+			utils.ZapRequestID(req.HeaderParameter("Request-Id")),
 			zap.String("method", req.Request.Method),
 			zap.String("url", req.Request.URL.String()),
 			zap.Duration("handling-time", diff),
@@ -477,34 +590,35 @@ func (h *HTTPServer) postProcess(req *restful.Request, rsp *restful.Response) {
 	}
 
 	if recordApiCall {
-		_ = h.statis.AddAPICall(method, "HTTP", int(code), diff.Nanoseconds())
+		h.statis.ReportCallMetrics(metrics.CallMetric{
+			Type:     metrics.ServerCallMetric,
+			API:      method,
+			Protocol: "HTTP",
+			Code:     int(code),
+			Duration: diff,
+		})
 	}
 }
 
 // enterAuth 访问鉴权
 func (h *HTTPServer) enterAuth(req *restful.Request, rsp *restful.Response) error {
-	// 判断鉴权插件是否开启
-	if h.auth == nil {
+	// 判断白名单插件是否开启
+	if h.whitelist == nil {
 		return nil
 	}
 
 	rid := req.HeaderParameter("Request-Id")
-	pid := req.HeaderParameter("Platform-Id")
-	pToken := req.HeaderParameter("Platform-Token")
 
 	address := req.Request.RemoteAddr
 	segments := strings.Split(address, ":")
 	if len(segments) != 2 {
 		return nil
 	}
-
-	if !h.auth.IsWhiteList(segments[0]) && !h.auth.Allow(pid, pToken) {
+	if !h.whitelist.Contain(segments[0]) {
 		log.Error("http access is not allowed",
 			zap.String("client", address),
-			zap.String("request-id", rid),
-			zap.String("platform-id", pid),
-			zap.String("platform-token", pToken))
-		HTTPResponse(req, rsp, api.NotAllowedAccess)
+			utils.ZapRequestID(rid))
+		httpcommon.HTTPResponse(req, rsp, api.NotAllowedAccess)
 		return errors.New("http access is not allowed")
 	}
 	return nil
@@ -527,8 +641,8 @@ func (h *HTTPServer) enterRateLimit(req *restful.Request, rsp *restful.Response)
 	}
 	if ok := h.rateLimit.Allow(plugin.IPRatelimit, segments[0]); !ok {
 		log.Error("ip ratelimit is not allow", zap.String("client", address),
-			zap.String("request-id", rid))
-		HTTPResponse(req, rsp, api.IPRateLimit)
+			utils.ZapRequestID(rid))
+		httpcommon.HTTPResponse(req, rsp, api.IPRateLimit)
 		return errors.New("ip ratelimit is not allow")
 	}
 
@@ -537,40 +651,49 @@ func (h *HTTPServer) enterRateLimit(req *restful.Request, rsp *restful.Response)
 		strings.TrimSuffix(req.Request.URL.Path, "/"))
 	if ok := h.rateLimit.Allow(plugin.APIRatelimit, apiName); !ok {
 		log.Error("api ratelimit is not allow", zap.String("client", address),
-			zap.String("request-id", rid), zap.String("api", apiName))
-		HTTPResponse(req, rsp, api.APIRateLimit)
+			utils.ZapRequestID(rid), zap.String("api", apiName))
+		httpcommon.HTTPResponse(req, rsp, api.APIRateLimit)
 		return errors.New("api ratelimit is not allow")
 	}
 
 	return nil
 }
 
-// tcpKeepAliveListener sets TCP keep-alive timeouts on accepted
-// connections. It's used by ListenAndServe and ListenAndServeTLS so
-// dead TCP connections (e.g. closing laptop mid-download) eventually
-// go away.
-// 来自net/http
-type tcpKeepAliveListener struct {
-	*net.TCPListener
+func (h *HTTPServer) recoverFunc(i interface{}, w http.ResponseWriter) {
+	log.Errorf("panic %+v", i)
+	obj := &service_manage.Response{}
+
+	status := api.CalcCode(obj)
+	if code := obj.GetCode().GetValue(); code != api.ExecuteSuccess {
+		w.Header().Add(utils.PolarisCode, fmt.Sprintf("%d", code))
+		w.Header().Add(utils.PolarisMessage, api.Code2Info(code))
+	}
+	w.WriteHeader(status)
+
+	m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
+	_ = m.Marshal(w, obj)
 }
 
-var defaultAlivePeriodTime = 3 * time.Minute
-
-// Accept 来自于net/http
-func (ln tcpKeepAliveListener) Accept() (net.Conn, error) {
-	tc, err := ln.AcceptTCP()
-	if err != nil {
-		return nil, err
+func discoverCacheConvert(m interface{}) *httpcommon.CacheObject {
+	resp, ok := m.(*apiservice.DiscoverResponse)
+	if !ok {
+		return nil
 	}
-	err = tc.SetKeepAlive(true)
-	if err != nil {
-		return nil, err
+	if resp.Code.GetValue() != uint32(apimodel.Code_ExecuteSuccess) {
+		return nil
 	}
-
-	err = tc.SetKeepAlivePeriod(defaultAlivePeriodTime)
-	if err != nil {
-		return nil, err
+	if resp.GetService().GetRevision().GetValue() == "" {
+		return nil
 	}
+	if _, ok := cacheTypes[resp.GetType().String()]; !ok {
+		return nil
+	}
+	keyProto := fmt.Sprintf("%s-%s-%s", resp.GetService().GetNamespace().GetValue(),
+		resp.GetService().GetName().GetValue(), resp.GetService().GetRevision().GetValue())
 
-	return tc, nil
+	return &httpcommon.CacheObject{
+		OriginVal: resp,
+		CacheType: resp.Type.String(),
+		Key:       keyProto,
+	}
 }

@@ -22,24 +22,26 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/polarismesh/polaris/common/model"
 )
 
 func Test_ConvertToClientObject(t *testing.T) {
-	client := &api.Client{
+	client := &apiservice.Client{
 		Host:    &wrapperspb.StringValue{Value: "1"},
 		Type:    0,
 		Version: &wrapperspb.StringValue{Value: "1"},
-		Location: &api.Location{
+		Location: &apimodel.Location{
 			Region: &wrapperspb.StringValue{Value: "1"},
 			Zone:   &wrapperspb.StringValue{Value: "1"},
 			Campus: &wrapperspb.StringValue{Value: "1"},
 		},
 		Id: &wrapperspb.StringValue{Value: "1"},
-		Stat: []*api.StatInfo{
+		Stat: []*apiservice.StatInfo{
 			{
 				Target:   &wrapperspb.StringValue{Value: "prometheus"},
 				Port:     &wrapperspb.UInt32Value{Value: 8080},
@@ -64,18 +66,18 @@ func Test_ConvertToClientObject(t *testing.T) {
 func createMockClients(total int) []*model.Client {
 	ret := make([]*model.Client, 0, total)
 
-	for i := 0; i < 10; i++ {
-		ret = append(ret, model.NewClient(&api.Client{
+	for i := 0; i < total; i++ {
+		ret = append(ret, model.NewClient(&apiservice.Client{
 			Host:    &wrapperspb.StringValue{Value: fmt.Sprintf("client-%d", i)},
 			Type:    0,
 			Version: &wrapperspb.StringValue{Value: fmt.Sprintf("client-%d", i)},
-			Location: &api.Location{
+			Location: &apimodel.Location{
 				Region: &wrapperspb.StringValue{Value: fmt.Sprintf("client-%d-region", i)},
 				Zone:   &wrapperspb.StringValue{Value: fmt.Sprintf("client-%d-zone", i)},
 				Campus: &wrapperspb.StringValue{Value: fmt.Sprintf("client-%d-campus", i)},
 			},
 			Id: &wrapperspb.StringValue{Value: fmt.Sprintf("client-%d", i)},
-			Stat: []*api.StatInfo{
+			Stat: []*apiservice.StatInfo{
 				{
 					Target:   &wrapperspb.StringValue{Value: "prometheus"},
 					Port:     &wrapperspb.UInt32Value{Value: 8080},

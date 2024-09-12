@@ -18,9 +18,9 @@
 package boltdb
 
 import (
-	"github.com/boltdb/bolt"
+	bolt "go.etcd.io/bbolt"
 
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/store"
 )
 
 type Tx struct {
@@ -43,4 +43,8 @@ func (t *Tx) Rollback() error {
 
 func (t *Tx) GetDelegateTx() interface{} {
 	return t.delegateTx
+}
+
+func (t *Tx) CreateReadView() error {
+	return nil
 }

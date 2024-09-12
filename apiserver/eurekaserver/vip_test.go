@@ -20,13 +20,11 @@ package eurekaserver
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
-	"bou.ke/monkey"
-	"github.com/google/uuid"
-	"github.com/polarismesh/polaris-server/service"
-
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/service"
 )
 
 const (
@@ -94,8 +92,8 @@ func buildMockSvipInstances() {
 
 func doVipFunctionMock() {
 	buildMockVipInstances()
-	monkey.Patch(getCacheServices, mockGetVipServices)
-	monkey.Patch(getCacheInstances, mockGetVipInstances)
+	getCacheServicesFunc = mockGetVipServices
+	getCacheInstancesFunc = mockGetVipInstances
 }
 
 func mockGetVipServices(namingServer service.DiscoverServer, namespace string) map[string]*model.Service {
@@ -120,7 +118,7 @@ func mockGetVipInstances(namingServer service.DiscoverServer, svcId string) ([]*
 	return retValue, uuid.NewString(), nil
 }
 
-//TestBuildApplicationsForVip test method for BuildApplicationsForVip
+// TestBuildApplicationsForVip test method for BuildApplicationsForVip
 func TestBuildApplicationsForVip(t *testing.T) {
 	doVipFunctionMock()
 	builder := &ApplicationsBuilder{
@@ -150,8 +148,8 @@ func TestBuildApplicationsForVip(t *testing.T) {
 
 func doSVipFunctionMock() {
 	buildMockSvipInstances()
-	monkey.Patch(getCacheServices, mockGetSvipServices)
-	monkey.Patch(getCacheInstances, mockGetSvipInstances)
+	getCacheServicesFunc = mockGetSvipServices
+	getCacheInstancesFunc = mockGetSvipInstances
 }
 
 func mockGetSvipServices(namingServer service.DiscoverServer, namespace string) map[string]*model.Service {
@@ -176,7 +174,7 @@ func mockGetSvipInstances(namingServer service.DiscoverServer, svcId string) ([]
 	return retValue, uuid.NewString(), nil
 }
 
-//TestBuildApplicationsForSVip test method for BuildApplicationsForVip
+// TestBuildApplicationsForSVip test method for BuildApplicationsForVip
 func TestBuildApplicationsForSvip(t *testing.T) {
 	doSVipFunctionMock()
 	builder := &ApplicationsBuilder{

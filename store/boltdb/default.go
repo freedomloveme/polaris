@@ -20,23 +20,47 @@ package boltdb
 import (
 	"time"
 
-	"github.com/boltdb/bolt"
-
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	logger "github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/common/utils"
-	"github.com/polarismesh/polaris-server/store"
+	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/polarismesh/polaris/common/model"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/store"
 )
 
 const (
+
+	// SystemNamespace system namespace
+	SystemNamespace = "Polaris"
+	// STORENAME database storage name
 	STORENAME = "boltdbStore"
+	// DefaultConnMaxLifetime default maximum connection lifetime
+	DefaultConnMaxLifetime = 60 * 30 // 默认是30分钟
+)
+
+const (
+	svcSpecificQueryKeyService   = "service"
+	svcSpecificQueryKeyNamespace = "serviceNamespace"
+	exactName                    = "exactName"
+	excludeId                    = "excludeId"
+)
+
+const (
+	CommonFieldValid       = "Valid"
+	CommonFieldEnableTime  = "EnableTime"
+	CommonFieldModifyTime  = "ModifyTime"
+	CommonFieldRevision    = "Revision"
+	CommonFieldID          = "ID"
+	CommonFieldName        = "Name"
+	CommonFieldNamespace   = "Namespace"
+	CommonFieldDescription = "Description"
+	CommonFieldEnable      = "Enable"
 )
 
 type boltStore struct {
 	*namespaceStore
-	*businessStore
 	*clientStore
 
 	// 服务注册发现、治理
@@ -45,23 +69,30 @@ type boltStore struct {
 	*l5Store
 	*routingStore
 	*rateLimitStore
-	*platformStore
 	*circuitBreakerStore
-
-	// 工具
-	*toolStore
-
-	// 鉴权模块相关
-	*userStore
-	*groupStore
-	*strategyStore
+	*faultDetectStore
+	*routingStoreV2
+	*serviceContractStore
+	*laneStore
 
 	// 配置中心stores
 	*configFileGroupStore
 	*configFileStore
 	*configFileReleaseStore
 	*configFileReleaseHistoryStore
-	*configFileTagStore
+	*configFileTemplateStore
+
+	*grayStore
+
+	// adminStore store
+	*adminStore
+	// 工具
+	*toolStore
+	// 鉴权模块相关
+	*userStore
+	*groupStore
+	*strategyStore
+	*roleStore
 
 	handler BoltHandler
 	start   bool
@@ -89,14 +120,14 @@ func (m *boltStore) Initialize(c *store.Config) error {
 		return err
 	}
 
-	if err = m.initAuthStoreData(); err != nil {
-		_ = handler.Close()
-		return err
-	}
-
-	if err = m.initNamingStoreData(); err != nil {
-		_ = handler.Close()
-		return err
+	if loadFile, ok := c.Option["loadFile"].(string); ok {
+		if err := m.loadByFile(loadFile); err != nil {
+			return err
+		}
+	} else {
+		if err := m.loadByDefault(); err != nil {
+			return err
+		}
 	}
 	m.start = true
 	return nil
@@ -111,12 +142,10 @@ var (
 	namespacesToInit = []string{"default", namespacePolaris}
 	servicesToInit   = map[string]string{
 		"polaris.checker": "fbca9bfa04ae4ead86e1ecf5811e32a9",
-		"polaris.monitor": "bbfdda174ea64e11ac862adf14593c03",
-		"polaris.config":  "e6542db1a2cc846c1866010b40b7f51f",
 	}
 
-	mainUser = &model.User{
-		ID:          "04ae4ead86e1ecf5811e32a9fbca9bfa",
+	mainUser = &authcommon.User{
+		ID:          "65e4789a6d5b49669adf1e9e8387549c",
 		Name:        "polaris",
 		Password:    "$2a$10$3izWuZtE5SBdAtSZci.gs.iZ2pAn9I8hEqYrC6gwJp1dyjqQnrrum",
 		Owner:       "",
@@ -124,7 +153,7 @@ var (
 		Mobile:      "",
 		Email:       "",
 		Type:        20,
-		Token:       "4azbewS+pdXvrMG1PtYV3SrcLxjmYd0IVNaX9oYziQygRnKzjcSbxl+Reg7zYQC1gRrGiLzmMY+w+aCxOYI=",
+		Token:       "nu/0WRA4EqSR1FagrjRj0fZwPXuGlMpX+zCuWu4uMqy8xr1vRjisSbA25aAC3mtU8MeeRsKhQiDAynUR09I=",
 		TokenEnable: true,
 		Valid:       true,
 		Comment:     "default polaris admin account",
@@ -132,34 +161,71 @@ var (
 		ModifyTime:  time.Now(),
 	}
 
-	mainDefaultStrategy = &model.StrategyDetail{
+	superDefaultStrategy = &authcommon.StrategyDetail{
+		ID:      "super_user_default_strategy",
+		Name:    "(用户) polarissys@admin的默认策略",
+		Action:  "READ_WRITE",
+		Comment: "default admin",
+		Principals: []authcommon.Principal{
+			{
+				StrategyID:    "super_user_default_strategy",
+				PrincipalID:   "",
+				PrincipalType: authcommon.PrincipalUser,
+			},
+		},
+		Default: true,
+		Owner:   "",
+		Resources: []authcommon.StrategyResource{
+			{
+				StrategyID: "super_user_default_strategy",
+				ResType:    int32(apisecurity.ResourceType_Namespaces),
+				ResID:      "*",
+			},
+			{
+				StrategyID: "super_user_default_strategy",
+				ResType:    int32(apisecurity.ResourceType_Services),
+				ResID:      "*",
+			},
+			{
+				StrategyID: "super_user_default_strategy",
+				ResType:    int32(apisecurity.ResourceType_ConfigGroups),
+				ResID:      "*",
+			},
+		},
+		Valid:      true,
+		Revision:   "fbca9bfa04ae4ead86e1ecf5811e32a9",
+		CreateTime: time.Now(),
+		ModifyTime: time.Now(),
+	}
+
+	mainDefaultStrategy = &authcommon.StrategyDetail{
 		ID:      "fbca9bfa04ae4ead86e1ecf5811e32a9",
 		Name:    "(用户) polaris的默认策略",
 		Action:  "READ_WRITE",
 		Comment: "default admin",
-		Principals: []model.Principal{
+		Principals: []authcommon.Principal{
 			{
 				StrategyID:    "fbca9bfa04ae4ead86e1ecf5811e32a9",
-				PrincipalID:   "04ae4ead86e1ecf5811e32a9fbca9bfa",
-				PrincipalRole: model.PrincipalUser,
+				PrincipalID:   "65e4789a6d5b49669adf1e9e8387549c",
+				PrincipalType: authcommon.PrincipalUser,
 			},
 		},
 		Default: true,
-		Owner:   "04ae4ead86e1ecf5811e32a9fbca9bfa",
-		Resources: []model.StrategyResource{
+		Owner:   "65e4789a6d5b49669adf1e9e8387549c",
+		Resources: []authcommon.StrategyResource{
 			{
 				StrategyID: "fbca9bfa04ae4ead86e1ecf5811e32a9",
-				ResType:    int32(api.ResourceType_Namespaces),
+				ResType:    int32(apisecurity.ResourceType_Namespaces),
 				ResID:      "*",
 			},
 			{
 				StrategyID: "fbca9bfa04ae4ead86e1ecf5811e32a9",
-				ResType:    int32(api.ResourceType_Services),
+				ResType:    int32(apisecurity.ResourceType_Services),
 				ResID:      "*",
 			},
 			{
 				StrategyID: "fbca9bfa04ae4ead86e1ecf5811e32a9",
-				ResType:    int32(api.ResourceType_ConfigGroups),
+				ResType:    int32(apisecurity.ResourceType_ConfigGroups),
 				ResID:      "*",
 			},
 		},
@@ -216,7 +282,7 @@ func (m *boltStore) initAuthStoreData() error {
 			user = mainUser
 			// 添加主账户主体信息
 			if err := saveValue(tx, tblUser, user.ID, converToUserStore(user)); err != nil {
-				logger.AuthScope().Error("[Store][User] save user fail", zap.Error(err), zap.String("name", user.Name))
+				authLog.Error("[Store][User] save user fail", zap.Error(err), zap.String("name", user.Name))
 				return err
 			}
 		}
@@ -230,7 +296,7 @@ func (m *boltStore) initAuthStoreData() error {
 			strategy := mainDefaultStrategy
 			// 添加主账户的默认鉴权策略信息
 			if err := saveValue(tx, tblStrategy, strategy.ID, convertForStrategyStore(strategy)); err != nil {
-				logger.AuthScope().Error("[Store][Strategy] save auth_strategy", zap.Error(err),
+				authLog.Error("[Store][Strategy] save auth_strategy", zap.Error(err),
 					zap.String("name", strategy.Name), zap.String("owner", strategy.Owner))
 				return err
 			}
@@ -250,76 +316,43 @@ func (m *boltStore) newStore() error {
 	if err = m.namespaceStore.InitData(); err != nil {
 		return err
 	}
-	m.businessStore = &businessStore{handler: m.handler}
-	m.platformStore = &platformStore{handler: m.handler}
 	m.clientStore = &clientStore{handler: m.handler}
-
-	if err := m.newDiscoverModuleStore(); err != nil {
-		return err
-	}
-	if err := m.newAuthModuleStore(); err != nil {
-		return err
-	}
-	if err := m.newConfigModuleStore(); err != nil {
-		return err
-	}
-
+	m.grayStore = &grayStore{handler: m.handler}
+	m.newDiscoverModuleStore()
+	m.newAuthModuleStore()
+	m.newConfigModuleStore()
+	m.newMaintainModuleStore()
 	return nil
 }
 
-func (m *boltStore) newDiscoverModuleStore() error {
+func (m *boltStore) newDiscoverModuleStore() {
 	m.serviceStore = &serviceStore{handler: m.handler}
-
 	m.instanceStore = &instanceStore{handler: m.handler}
-
 	m.routingStore = &routingStore{handler: m.handler}
-
 	m.rateLimitStore = &rateLimitStore{handler: m.handler}
-
 	m.circuitBreakerStore = &circuitBreakerStore{handler: m.handler}
-
-	return nil
+	m.faultDetectStore = &faultDetectStore{handler: m.handler}
+	m.routingStoreV2 = &routingStoreV2{handler: m.handler}
+	m.serviceContractStore = &serviceContractStore{handler: m.handler}
+	m.laneStore = &laneStore{handler: m.handler}
 }
 
-func (m *boltStore) newAuthModuleStore() error {
+func (m *boltStore) newAuthModuleStore() {
 	m.userStore = &userStore{handler: m.handler}
-
 	m.strategyStore = &strategyStore{handler: m.handler}
-
 	m.groupStore = &groupStore{handler: m.handler}
-
-	return nil
 }
 
-func (m *boltStore) newConfigModuleStore() error {
-	var err error
+func (m *boltStore) newConfigModuleStore() {
+	m.configFileStore = newConfigFileStore(m.handler)
+	m.configFileGroupStore = newConfigFileGroupStore(m.handler)
+	m.configFileReleaseHistoryStore = newConfigFileReleaseHistoryStore(m.handler)
+	m.configFileReleaseStore = newConfigFileReleaseStore(m.handler)
+	m.configFileTemplateStore = newConfigFileTemplateStore(m.handler)
+}
 
-	m.configFileStore, err = newConfigFileStore(m.handler)
-	if err != nil {
-		return err
-	}
-
-	m.configFileTagStore, err = newConfigFileTagStore(m.handler)
-	if err != nil {
-		return err
-	}
-
-	m.configFileGroupStore, err = newConfigFileGroupStore(m.handler)
-	if err != nil {
-		return err
-	}
-
-	m.configFileReleaseHistoryStore, err = newConfigFileReleaseHistoryStore(m.handler)
-	if err != nil {
-		return err
-	}
-
-	m.configFileReleaseStore, err = newConfigFileReleaseStore(m.handler)
-	if err != nil {
-		return err
-	}
-
-	return nil
+func (m *boltStore) newMaintainModuleStore() {
+	m.adminStore = &adminStore{handler: m.handler, leMap: make(map[string]bool)}
 }
 
 // Destroy store
@@ -338,6 +371,10 @@ func (m *boltStore) CreateTransaction() (store.Transaction, error) {
 
 // StartTx starting transactions
 func (m *boltStore) StartTx() (store.Tx, error) {
+	return m.handler.StartTx()
+}
+
+func (m *boltStore) StartReadTx() (store.Tx, error) {
 	return m.handler.StartTx()
 }
 

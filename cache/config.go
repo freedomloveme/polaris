@@ -1,5 +1,5 @@
 /**
- * Tencent is pleased to support the open source community by making CL5 available.
+ * Tencent is pleased to support the open source community by making Polaris available.
  *
  * Copyright (C) 2019 THL A29 Limited, a Tencent company. All rights reserved.
  *
@@ -17,16 +17,14 @@
 
 package cache
 
+import "time"
+
 // Config 缓存配置
 type Config struct {
-	Open      bool `yaml:"open"`
-	Resources []ConfigEntry
-}
-
-// ConfigEntry 单个缓存资源配置
-type ConfigEntry struct {
-	Name   string                 `yaml:"name"`
-	Option map[string]interface{} `yaml:"option"`
+	// DiffTime 设置拉取时间范围, [T1 - abs(DiffTime), T1]
+	DiffTime time.Duration `yaml:"diffTime"`
+	// ReportInterval 监控数据上报周期
+	ReportInterval time.Duration `yaml:"reportInterval"`
 }
 
 var (

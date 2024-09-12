@@ -30,13 +30,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/golang/protobuf/ptypes/wrappers"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/model"
-	"github.com/polarismesh/polaris-server/store"
-
-	api "github.com/polarismesh/polaris-server/common/api/v1"
+	api "github.com/polarismesh/polaris/common/api/v1"
+	"github.com/polarismesh/polaris/common/log"
 )
 
 // some options config
@@ -87,29 +87,27 @@ const (
 	MaxDbCircuitbreakerOwner      = 1024
 	MaxDbCircuitbreakerVersion    = 32
 
-	// platform表
+	MaxRuleName = 64
+
 	MaxPlatformIDLength     = 32
 	MaxPlatformNameLength   = 128
 	MaxPlatformDomainLength = 1024
 	MaxPlatformQPS          = 65535
 )
 
+var resourceNameRE = regexp.MustCompile("^[0-9A-Za-z-./:_]+$")
+
 // CheckResourceName 检查资源Name
 func CheckResourceName(name *wrappers.StringValue) error {
 	if name == nil {
-		return errors.New("nil")
+		return errors.New(NilErrString)
 	}
 
 	if name.GetValue() == "" {
-		return errors.New("empty")
+		return errors.New(EmptyErrString)
 	}
 
-	regStr := "^[0-9A-Za-z-./:_]+$"
-	ok, err := regexp.MatchString(regStr, name.GetValue())
-	if err != nil {
-		return err
-	}
-	if !ok {
+	if ok := resourceNameRE.MatchString(name.GetValue()); !ok {
 		return errors.New("name contains invalid character")
 	}
 
@@ -119,11 +117,11 @@ func CheckResourceName(name *wrappers.StringValue) error {
 // CheckResourceOwners 检查资源Owners
 func CheckResourceOwners(owners *wrappers.StringValue) error {
 	if owners == nil {
-		return errors.New("nil")
+		return errors.New(NilErrString)
 	}
 
 	if owners.GetValue() == "" {
-		return errors.New("empty")
+		return errors.New(EmptyErrString)
 	}
 
 	if utf8.RuneCountInString(owners.GetValue()) > MaxOwnersLength {
@@ -136,11 +134,11 @@ func CheckResourceOwners(owners *wrappers.StringValue) error {
 // CheckInstanceHost 检查服务实例Host
 func CheckInstanceHost(host *wrappers.StringValue) error {
 	if host == nil {
-		return errors.New("nil")
+		return errors.New(NilErrString)
 	}
 
 	if host.GetValue() == "" {
-		return errors.New("empty")
+		return errors.New(EmptyErrString)
 	}
 
 	return nil
@@ -149,11 +147,7 @@ func CheckInstanceHost(host *wrappers.StringValue) error {
 // CheckInstancePort 检查服务实例Port
 func CheckInstancePort(port *wrappers.UInt32Value) error {
 	if port == nil {
-		return errors.New("nil")
-	}
-
-	if port.GetValue() < 0 {
-		return errors.New("empty")
+		return errors.New(NilErrString)
 	}
 
 	return nil
@@ -324,33 +318,6 @@ func ParseOffsetAndLimit(query map[string]string) (uint32, uint32, error) {
 	return ofs, lmt, nil
 }
 
-// ParseInstanceArgs 解析服务实例的 ip 和 port 查询参数
-func ParseInstanceArgs(query map[string]string) (*store.InstanceArgs, error) {
-	if len(query) == 0 {
-		return nil, nil
-	}
-	hosts, ok := query["host"]
-	if !ok {
-		return nil, fmt.Errorf("port parameter can not be used alone without host")
-	}
-	res := &store.InstanceArgs{}
-	res.Hosts = strings.Split(hosts, ",")
-	ports, ok := query["port"]
-	if !ok {
-		return res, nil
-	}
-
-	portSlices := strings.Split(ports, ",")
-	for _, portStr := range portSlices {
-		port, err := strconv.ParseUint(portStr, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("%s can not parse as uint, err is %s", portStr, err.Error())
-		}
-		res.Ports = append(res.Ports, uint32(port))
-	}
-	return res, nil
-}
-
 // ParseRequestID 从ctx中获取Request-ID
 func ParseRequestID(ctx context.Context) string {
 	if ctx == nil {
@@ -360,11 +327,24 @@ func ParseRequestID(ctx context.Context) string {
 	return rid
 }
 
+// ParseClientAddress 从ctx中获取客户端地址
 func ParseClientAddress(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
 	rid, _ := ctx.Value(ContextClientAddress).(string)
+	return rid
+}
+
+// ParseClientIP .
+func ParseClientIP(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	rid, _ := ctx.Value(ContextClientAddress).(string)
+	if strings.Contains(rid, ":") {
+		return strings.Split(rid, ":")[0]
+	}
 	return rid
 }
 
@@ -388,16 +368,6 @@ func ParseIsOwner(ctx context.Context) bool {
 	return isOwner
 }
 
-// ParseUserRole 从ctx中解析用户角色
-func ParseUserRole(ctx context.Context) model.UserRoleType {
-	if ctx == nil {
-		return model.SubAccountUserRole
-	}
-
-	role, _ := ctx.Value(ContextUserRoleIDKey).(model.UserRoleType)
-	return role
-}
-
 // ParseUserID 从ctx中解析用户ID
 func ParseUserID(ctx context.Context) string {
 	if ctx == nil {
@@ -415,6 +385,9 @@ func ParseUserName(ctx context.Context) string {
 	}
 
 	userName, _ := ctx.Value(ContextUserNameKey).(string)
+	if userName == "" {
+		return ParseOperator(ctx)
+	}
 	return userName
 }
 
@@ -445,7 +418,7 @@ func ParseOperator(ctx context.Context) string {
 		return defaultOperator
 	}
 
-	if operator, _ := ctx.Value(StringContext("operator")).(string); operator != "" {
+	if operator, _ := ctx.Value(ContextOperator).(string); operator != "" {
 		return operator
 	}
 
@@ -475,8 +448,8 @@ func ZapRequestID(id string) zap.Field {
 	return zap.String("request-id", id)
 }
 
-// ZapRequestIDByCtx 从ctx中获取Request-ID
-func ZapRequestIDByCtx(ctx context.Context) zap.Field {
+// RequestID 从ctx中获取Request-ID
+func RequestID(ctx context.Context) zap.Field {
 	return zap.String("request-id", ParseRequestID(ctx))
 }
 
@@ -485,10 +458,45 @@ func ZapPlatformID(id string) zap.Field {
 	return zap.String("platform-id", id)
 }
 
+// ZapInstanceID 生成instanceID的日志描述
+func ZapInstanceID(id string) zap.Field {
+	return zap.String("instance-id", id)
+}
+
+// ZapNamespace 生成namespace的日志描述
+func ZapNamespace(namespace string) zap.Field {
+	return zap.String("namesapce", namespace)
+}
+
+// ZapGroup 生成group的日志描述
+func ZapGroup(group string) zap.Field {
+	return zap.String("group", group)
+}
+
+// ZapFileName 生成fileName的日志描述
+func ZapFileName(fileName string) zap.Field {
+	return zap.String("file-name", fileName)
+}
+
+// ZapReleaseName 生成fileName的日志描述
+func ZapReleaseName(fileName string) zap.Field {
+	return zap.String("release-name", fileName)
+}
+
+// ZapVersion 生成 version 的日志描述
+func ZapVersion(version uint64) zap.Field {
+	return zap.Uint64("version", version)
+}
+
 // CheckDbStrFieldLen 检查name字段是否超过DB中对应字段的最大字符长度限制
 func CheckDbStrFieldLen(param *wrappers.StringValue, dbLen int) error {
-	if param.GetValue() != "" && utf8.RuneCountInString(param.GetValue()) > dbLen {
-		errMsg := fmt.Sprintf("length of %s is over %d", param.GetValue(), dbLen)
+	return CheckDbRawStrFieldLen(param.GetValue(), dbLen)
+}
+
+// CheckDbRawStrFieldLen 检查name字段是否超过DB中对应字段的最大字符长度限制
+func CheckDbRawStrFieldLen(param string, dbLen int) error {
+	if param != "" && utf8.RuneCountInString(param) > dbLen {
+		errMsg := fmt.Sprintf("length of %s is over %d", param, dbLen)
 		return errors.New(errMsg)
 	}
 	return nil
@@ -507,21 +515,21 @@ func CheckDbMetaDataFieldLen(metaData map[string]string) error {
 }
 
 // CheckInstanceTetrad 根据服务实例四元组计算ID
-func CheckInstanceTetrad(req *api.Instance) (string, *api.Response) {
+func CheckInstanceTetrad(req *apiservice.Instance) (string, *apiservice.Response) {
 	if err := CheckResourceName(req.GetService()); err != nil {
-		return "", api.NewInstanceResponse(api.InvalidServiceName, req)
+		return "", api.NewInstanceResponse(apimodel.Code_InvalidServiceName, req)
 	}
 
 	if err := CheckResourceName(req.GetNamespace()); err != nil {
-		return "", api.NewInstanceResponse(api.InvalidNamespaceName, req)
+		return "", api.NewInstanceResponse(apimodel.Code_InvalidNamespaceName, req)
 	}
 
 	if err := CheckInstanceHost(req.GetHost()); err != nil {
-		return "", api.NewInstanceResponse(api.InvalidInstanceHost, req)
+		return "", api.NewInstanceResponse(apimodel.Code_InvalidInstanceHost, req)
 	}
 
 	if err := CheckInstancePort(req.GetPort()); err != nil {
-		return "", api.NewInstanceResponse(api.InvalidInstancePort, req)
+		return "", api.NewInstanceResponse(apimodel.Code_InvalidInstancePort, req)
 	}
 
 	var instID = req.GetId().GetValue()
@@ -534,9 +542,69 @@ func CheckInstanceTetrad(req *api.Instance) (string, *api.Response) {
 			req.GetPort().GetValue(),
 		)
 		if err != nil {
-			return "", api.NewInstanceResponse(api.ExecuteException, req)
+			return "", api.NewInstanceResponse(apimodel.Code_ExecuteException, req)
 		}
 		instID = id
 	}
 	return instID, nil
+}
+
+// ConvertStringValuesToSlice 转换StringValues为字符串切片
+func ConvertStringValuesToSlice(vals []*wrapperspb.StringValue) []string {
+	ret := make([]string, 0, 4)
+
+	for index := range vals {
+		id := vals[index]
+		if strings.TrimSpace(id.GetValue()) == "" {
+			continue
+		}
+		ret = append(ret, id.GetValue())
+	}
+
+	return ret
+}
+
+// CheckContractTetrad 根据服务实例四元组计算ID
+func CheckContractTetrad(req *apiservice.ServiceContract) (string, *apiservice.Response) {
+	str := fmt.Sprintf("%s##%s##%s##%s##%s", req.GetNamespace(), req.GetService(), req.GetName(),
+		req.GetProtocol(), req.GetVersion())
+
+	h := sha1.New()
+	if _, err := io.WriteString(h, str); err != nil {
+		return "", api.NewResponse(apimodel.Code_ExecuteException)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func CheckContractInterfaceTetrad(contractId string, source apiservice.InterfaceDescriptor_Source,
+	req *apiservice.InterfaceDescriptor) (string, *apiservice.Response) {
+	if contractId == "" {
+		return "", api.NewResponseWithMsg(apimodel.Code_BadRequest, "invalid service_contract id")
+	}
+	if req.GetId() != "" {
+		return req.GetId(), nil
+	}
+	if req.GetPath() == "" {
+		return "", api.NewResponseWithMsg(apimodel.Code_BadRequest, "invalid service_contract interface path")
+	}
+	h := sha1.New()
+	str := fmt.Sprintf("%s##%s##%s##%s##%d", contractId, req.GetMethod(), req.GetPath(), req.GetName(), source)
+
+	if _, err := io.WriteString(h, str); err != nil {
+		return "", api.NewResponseWithMsg(apimodel.Code_ExecuteException, err.Error())
+	}
+	out := hex.EncodeToString(h.Sum(nil))
+	return out, nil
+}
+
+func CalculateContractID(namespace, service, name, protocol, version string) (string, error) {
+	h := sha1.New()
+	str := fmt.Sprintf("%s##%s##%s##%s##%s", namespace, service, name, protocol, version)
+
+	if _, err := io.WriteString(h, str); err != nil {
+		return "", err
+	}
+
+	out := hex.EncodeToString(h.Sum(nil))
+	return out, nil
 }

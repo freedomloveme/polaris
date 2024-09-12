@@ -20,8 +20,8 @@ package plugin
 import (
 	"os"
 
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/common/model"
+	commonLog "github.com/polarismesh/polaris/common/log"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 // CMDB CMDB插件接口
@@ -54,7 +54,7 @@ func GetCMDB() CMDB {
 
 	once.Do(func() {
 		if err := plugin.Initialize(c); err != nil {
-			log.Errorf("plugin init err: %s", err.Error())
+			commonLog.GetScopeOrDefaultByName(c.Name).Errorf("plugin init err: %s", err.Error())
 			os.Exit(-1)
 		}
 	})

@@ -21,46 +21,138 @@ import (
 	"os"
 	"sync"
 
-	"github.com/polarismesh/polaris-server/common/log"
+	"github.com/polarismesh/polaris/common/metrics"
 )
 
 var (
-	statisOnce = &sync.Once{}
+	statisOnce sync.Once
+	_statis    Statis
 )
 
-const (
-	ComponentServer = "server"
-	ComponentRedis  = "redis"
-
-	ComponentProtobufCache = "protobuf"
-)
-
-// Statis 统计插件接口
+// Statis Statistical plugin interface
 type Statis interface {
 	Plugin
-
-	AddAPICall(api string, protocol string, code int, duration int64) error
-
-	AddRedisCall(api string, code int, duration int64) error
-
-	AddCacheCall(component string, cacheType string, miss bool, call int) error
+	// ReportCallMetrics report call metrics info
+	ReportCallMetrics(metric metrics.CallMetric)
+	// ReportDiscoveryMetrics report discovery metrics
+	ReportDiscoveryMetrics(metric ...metrics.DiscoveryMetric)
+	// ReportConfigMetrics report config_center metrics
+	ReportConfigMetrics(metric ...metrics.ConfigMetrics)
+	// ReportDiscoverCall report discover service times
+	ReportDiscoverCall(metric metrics.ClientDiscoverMetric)
 }
 
-// GetStatis 获取统计插件
-func GetStatis() Statis {
-	c := &config.Statis
+// compositeStatis is used to receive discover events from the agent
+type compositeStatis struct {
+	chain   []Statis
+	options []ConfigEntry
+}
 
-	plugin, exist := pluginSet[c.Name]
-	if !exist {
-		return nil
+func (c *compositeStatis) Name() string {
+	return "compositeStatis"
+}
+
+func (c *compositeStatis) Initialize(config *ConfigEntry) error {
+	for i := range c.options {
+		entry := c.options[i]
+		item, exist := pluginSet[entry.Name]
+		if !exist {
+			log.Errorf("plugin Statis not found target: %s", entry.Name)
+			continue
+		}
+
+		statis, ok := item.(Statis)
+		if !ok {
+			log.Errorf("plugin target: %s not Statis", entry.Name)
+			continue
+		}
+
+		if err := statis.Initialize(&entry); err != nil {
+			return err
+		}
+		c.chain = append(c.chain, statis)
+	}
+	return nil
+}
+
+func (c *compositeStatis) Destroy() error {
+	for i := range c.chain {
+		if err := c.chain[i].Destroy(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReportCallMetrics report call metrics info
+func (c *compositeStatis) ReportCallMetrics(metric metrics.CallMetric) {
+	for i := range c.chain {
+		c.chain[i].ReportCallMetrics(metric)
+	}
+}
+
+// ReportDiscoveryMetrics report discovery metrics
+func (c *compositeStatis) ReportDiscoveryMetrics(metric ...metrics.DiscoveryMetric) {
+	for i := range c.chain {
+		c.chain[i].ReportDiscoveryMetrics(metric...)
+	}
+}
+
+// ReportConfigMetrics report config_center metrics
+func (c *compositeStatis) ReportConfigMetrics(metric ...metrics.ConfigMetrics) {
+	for i := range c.chain {
+		c.chain[i].ReportConfigMetrics(metric...)
+	}
+}
+
+// ReportDiscoverCall report discover service times
+func (c *compositeStatis) ReportDiscoverCall(metric metrics.ClientDiscoverMetric) {
+	for i := range c.chain {
+		c.chain[i].ReportDiscoverCall(metric)
+	}
+}
+
+// GetStatis Get statistical plugin
+func GetStatis() Statis {
+	if _statis != nil {
+		return _statis
 	}
 
 	statisOnce.Do(func() {
-		if err := plugin.Initialize(c); err != nil {
-			log.Errorf("plugin init err: %s", err.Error())
+		var (
+			entries        []ConfigEntry
+			defaultEntries = []ConfigEntry{
+				{
+					Name: "local",
+				},
+				{
+					Name: "prometheus",
+				},
+			}
+		)
+
+		if len(config.Statis.Entries) != 0 {
+			entries = append(entries, config.Statis.Entries...)
+		} else {
+			if config.Statis.Name == "local" {
+				entries = defaultEntries
+			} else {
+				entries = append(entries, ConfigEntry{
+					Name:   config.Statis.Name,
+					Option: config.Statis.Option,
+				})
+			}
+		}
+
+		_statis = &compositeStatis{
+			chain:   []Statis{},
+			options: entries,
+		}
+		if err := _statis.Initialize(nil); err != nil {
+			log.Errorf("Statis plugin init err: %s", err.Error())
 			os.Exit(-1)
 		}
 	})
 
-	return plugin.(Statis)
+	return _statis
 }

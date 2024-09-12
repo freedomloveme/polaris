@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/emicklei/go-restful"
+	"github.com/emicklei/go-restful/v3"
 )
 
 // hashKey in map
@@ -48,11 +48,9 @@ func getParamFromEurekaRequestHeader(req *restful.Request, headerName string) st
 	headerValue := req.HeaderParameter(headerName)
 	if len(headerValue) > 0 {
 		return headerValue
-	} else {
-		headerValue = req.HeaderParameter(strings.ToLower(headerName))
-		return headerValue
 	}
-
+	headerValue = req.HeaderParameter(strings.ToLower(headerName))
+	return headerValue
 }
 
 func getAuthFromEurekaRequestHeader(req *restful.Request) (string, error) {
@@ -72,4 +70,25 @@ func getAuthFromEurekaRequestHeader(req *restful.Request) (string, error) {
 func writeHeader(httpStatus int, rsp *restful.Response) {
 	rsp.AddHeader(restful.HEADER_ContentType, restful.MIME_XML)
 	rsp.WriteHeader(httpStatus)
+}
+
+func formatWriteName(appId string) string {
+	return strings.ToLower(appId)
+}
+
+func formatReadName(appId string) string {
+	return strings.ToUpper(appId)
+}
+
+func readAppIdFromRequest(req *restful.Request) string {
+	appId := req.PathParameter(ParamAppId)
+	return formatReadName(appId)
+}
+
+func readNamespaceFromRequest(req *restful.Request, defaultValue string) string {
+	namespace := req.HeaderParameter(HeaderNamespace)
+	if len(namespace) == 0 {
+		namespace = defaultValue
+	}
+	return namespace
 }

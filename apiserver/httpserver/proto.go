@@ -19,12 +19,14 @@ package httpserver
 
 import (
 	"github.com/golang/protobuf/proto"
-
-	api "github.com/polarismesh/polaris-server/common/api/v1"
+	apiconfig "github.com/polarismesh/specification/source/go/api/v1/config_manage"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 )
 
 // NamespaceArr 命名空间数组定义
-type NamespaceArr []*api.Namespace
+type NamespaceArr []*apimodel.Namespace
 
 // Reset 重置初始化
 func (m *NamespaceArr) Reset() { *m = NamespaceArr{} }
@@ -35,68 +37,8 @@ func (m *NamespaceArr) String() string { return proto.CompactTextString(m) }
 // ProtoMessage return proto message
 func (*NamespaceArr) ProtoMessage() {}
 
-// ServiceArr 服务数组定义
-type ServiceArr []*api.Service
-
-// Reset 重置初始化
-func (m *ServiceArr) Reset() { *m = ServiceArr{} }
-
-// String return string
-func (m *ServiceArr) String() string { return proto.CompactTextString(m) }
-
-// ProtoMessage return proto message
-func (*ServiceArr) ProtoMessage() {}
-
-// InstanceArr 服务实例数组定义
-type InstanceArr []*api.Instance
-
-// Reset reset initialization
-func (m *InstanceArr) Reset() { *m = InstanceArr{} }
-
-// String
-func (m *InstanceArr) String() string { return proto.CompactTextString(m) }
-
-// ProtoMessage return proto message
-func (*InstanceArr) ProtoMessage() {}
-
-// RoutingArr 路由规则数组定义
-type RoutingArr []*api.Routing
-
-// Reset reset initialization
-func (m *RoutingArr) Reset() { *m = RoutingArr{} }
-
-// String return string
-func (m *RoutingArr) String() string { return proto.CompactTextString(m) }
-
-// ProtoMessage return proto message
-func (*RoutingArr) ProtoMessage() {}
-
-// RateLimitArr 限流规则数组定义
-type RateLimitArr []*api.Rule
-
-// Reset reset initialization
-func (m *RateLimitArr) Reset() { *m = RateLimitArr{} }
-
-// String
-func (m *RateLimitArr) String() string { return proto.CompactTextString(m) }
-
-// ProtoMessage return proto message
-func (*RateLimitArr) ProtoMessage() {}
-
-// CircuitBreakerArr 熔断规则数组定义
-type CircuitBreakerArr []*api.CircuitBreaker
-
-// Reset reset initialization
-func (m *CircuitBreakerArr) Reset() { *m = CircuitBreakerArr{} }
-
-// String
-func (m *CircuitBreakerArr) String() string { return proto.CompactTextString(m) }
-
-// ProtoMessage return proto message
-func (*CircuitBreakerArr) ProtoMessage() {}
-
 // ConfigReleaseArr 发布规则数组定义
-type ConfigReleaseArr []*api.ConfigRelease
+type ConfigReleaseArr []*apiservice.ConfigRelease
 
 // Reset reset initialization
 func (m *ConfigReleaseArr) Reset() { *m = ConfigReleaseArr{} }
@@ -107,20 +49,8 @@ func (m *ConfigReleaseArr) String() string { return proto.CompactTextString(m) }
 // ProtoMessage return proto message
 func (*ConfigReleaseArr) ProtoMessage() {}
 
-// PlatformArr 平台数组定义
-type PlatformArr []*api.Platform
-
-// Reset proto reset
-func (m *PlatformArr) Reset() { *m = PlatformArr{} }
-
-// String proto string
-func (m *PlatformArr) String() string { return proto.CompactTextString(m) }
-
-// ProtoMessage proto message
-func (m *PlatformArr) ProtoMessage() {}
-
 // ServiceAliasArr 服务实例数组定义
-type ServiceAliasArr []*api.ServiceAlias
+type ServiceAliasArr []*apiservice.ServiceAlias
 
 // Reset reset initialization
 func (m *ServiceAliasArr) Reset() { *m = ServiceAliasArr{} }
@@ -132,7 +62,7 @@ func (m *ServiceAliasArr) String() string { return proto.CompactTextString(m) }
 func (*ServiceAliasArr) ProtoMessage() {}
 
 // ConfigFileArr 配置文件数组定义
-type ConfigFileArr []*api.ConfigFile
+type ConfigFileArr []*apiconfig.ConfigFile
 
 // Reset reset initialization
 func (m *ConfigFileArr) Reset() { *m = ConfigFileArr{} }
@@ -142,3 +72,75 @@ func (m *ConfigFileArr) String() string { return proto.CompactTextString(m) }
 
 // ProtoMessage proto message
 func (*ConfigFileArr) ProtoMessage() {}
+
+// UserArr 命名空间数组定义
+type UserArr []*apisecurity.User
+
+// Reset 清空数组
+func (m *UserArr) Reset() { *m = UserArr{} }
+
+// String return string
+func (m *UserArr) String() string { return proto.CompactTextString(m) }
+
+// ProtoMessage return proto message
+func (*UserArr) ProtoMessage() {}
+
+// GroupArr 命名空间数组定义
+type GroupArr []*apisecurity.UserGroup
+
+// Reset 清空数组
+func (m *GroupArr) Reset() { *m = GroupArr{} }
+
+// String return string
+func (m *GroupArr) String() string { return proto.CompactTextString(m) }
+
+// ProtoMessage return proto message
+func (*GroupArr) ProtoMessage() {}
+
+// ModifyGroupArr 命名空间数组定义
+type ModifyGroupArr []*apisecurity.ModifyUserGroup
+
+// Reset 清空数组
+func (m *ModifyGroupArr) Reset() { *m = ModifyGroupArr{} }
+
+// String return string
+func (m *ModifyGroupArr) String() string { return proto.CompactTextString(m) }
+
+// ProtoMessage return proto message
+func (*ModifyGroupArr) ProtoMessage() {}
+
+// StrategyArr 命名空间数组定义
+type StrategyArr []*apisecurity.AuthStrategy
+
+// Reset 清空数组
+func (m *StrategyArr) Reset() { *m = StrategyArr{} }
+
+// String return string
+func (m *StrategyArr) String() string { return proto.CompactTextString(m) }
+
+// ProtoMessage return proto message
+func (*StrategyArr) ProtoMessage() {}
+
+// ModifyStrategyArr 命名空间数组定义
+type ModifyStrategyArr []*apisecurity.ModifyAuthStrategy
+
+// Reset 清空数组
+func (m *ModifyStrategyArr) Reset() { *m = ModifyStrategyArr{} }
+
+// String return string
+func (m *ModifyStrategyArr) String() string { return proto.CompactTextString(m) }
+
+// ProtoMessage return proto message
+func (*ModifyStrategyArr) ProtoMessage() {}
+
+// AuthResourceArr 命名空间数组定义
+type AuthResourceArr []*apisecurity.StrategyResources
+
+// Reset 清空数组
+func (m *AuthResourceArr) Reset() { *m = AuthResourceArr{} }
+
+// String return string
+func (m *AuthResourceArr) String() string { return proto.CompactTextString(m) }
+
+// ProtoMessage return proto message
+func (*AuthResourceArr) ProtoMessage() {}

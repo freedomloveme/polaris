@@ -20,85 +20,112 @@ package config
 import (
 	"context"
 
-	api "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
+	apiconfig "github.com/polarismesh/specification/source/go/api/v1/config_manage"
+
+	"github.com/polarismesh/polaris/common/model"
+)
+
+type (
+	// WatchCallback 监听回调函数
+	WatchCallback func() *apiconfig.ConfigClientResponse
 )
 
 const (
+	// MaxPageSize 最大分页大小
 	MaxPageSize = 100
 )
 
-// ConfigFileGroupAPI 配置文件组接口
+// ConfigFileGroupOperate 配置文件组接口
 type ConfigFileGroupOperate interface {
 	// CreateConfigFileGroup 创建配置文件组
-	CreateConfigFileGroup(ctx context.Context, configFileGroup *api.ConfigFileGroup) *api.ConfigResponse
-
-	// QueryConfigFileGroups 查询配置文件组, namespace 为完全匹配，groupName 为模糊匹配, fileName 为模糊匹配文件名
-	QueryConfigFileGroups(ctx context.Context, namespace, groupName, fileName string, offset, limit uint32) *api.ConfigBatchQueryResponse
-
+	CreateConfigFileGroup(ctx context.Context, configFileGroup *apiconfig.ConfigFileGroup) *apiconfig.ConfigResponse
+	// QueryConfigFileGroups 查询配置文件组
+	QueryConfigFileGroups(ctx context.Context, filter map[string]string) *apiconfig.ConfigBatchQueryResponse
 	// DeleteConfigFileGroup 删除配置文件组
-	DeleteConfigFileGroup(ctx context.Context, namespace, name string) *api.ConfigResponse
-
+	DeleteConfigFileGroup(ctx context.Context, namespace, name string) *apiconfig.ConfigResponse
 	// UpdateConfigFileGroup 更新配置文件组
-	UpdateConfigFileGroup(ctx context.Context, configFileGroup *api.ConfigFileGroup) *api.ConfigResponse
+	UpdateConfigFileGroup(ctx context.Context, configFileGroup *apiconfig.ConfigFileGroup) *apiconfig.ConfigResponse
 }
 
-// ConfigFileAPI 配置文件接口
+// ConfigFileOperate 配置文件接口
 type ConfigFileOperate interface {
 	// CreateConfigFile 创建配置文件
-	CreateConfigFile(ctx context.Context, configFile *api.ConfigFile) *api.ConfigResponse
-
-	// GetConfigFileBaseInfo 获取单个配置文件基础信息，不包含发布信息
-	GetConfigFileBaseInfo(ctx context.Context, namespace, group, name string) *api.ConfigResponse
-
+	CreateConfigFile(ctx context.Context, configFile *apiconfig.ConfigFile) *apiconfig.ConfigResponse
 	// GetConfigFileRichInfo 获取单个配置文件基础信息，包含发布状态等信息
-	GetConfigFileRichInfo(ctx context.Context, namespace, group, name string) *api.ConfigResponse
-
+	GetConfigFileRichInfo(ctx context.Context, req *apiconfig.ConfigFile) *apiconfig.ConfigResponse
 	// SearchConfigFile 按 group 和 name 模糊搜索配置文件
-	SearchConfigFile(ctx context.Context, namespace, group, name, tags string, offset, limit uint32) *api.ConfigBatchQueryResponse
-
+	SearchConfigFile(ctx context.Context, filter map[string]string) *apiconfig.ConfigBatchQueryResponse
 	// UpdateConfigFile 更新配置文件
-	UpdateConfigFile(ctx context.Context, configFile *api.ConfigFile) *api.ConfigResponse
-
+	UpdateConfigFile(ctx context.Context, configFile *apiconfig.ConfigFile) *apiconfig.ConfigResponse
 	// DeleteConfigFile 删除配置文件
-	DeleteConfigFile(ctx context.Context, namespace, group, name, deleteBy string) *api.ConfigResponse
-
+	DeleteConfigFile(ctx context.Context, req *apiconfig.ConfigFile) *apiconfig.ConfigResponse
 	// BatchDeleteConfigFile 批量删除配置文件
-	BatchDeleteConfigFile(ctx context.Context, configFiles []*api.ConfigFile, operator string) *api.ConfigResponse
+	BatchDeleteConfigFile(ctx context.Context, req []*apiconfig.ConfigFile) *apiconfig.ConfigResponse
+	// ExportConfigFile 导出配置文件
+	ExportConfigFile(ctx context.Context,
+		configFileExport *apiconfig.ConfigFileExportRequest) *apiconfig.ConfigExportResponse
+	// ImportConfigFile 导入配置文件
+	ImportConfigFile(ctx context.Context,
+		configFiles []*apiconfig.ConfigFile, conflictHandling string) *apiconfig.ConfigImportResponse
+	// GetAllConfigEncryptAlgorithms 获取配置加密算法
+	GetAllConfigEncryptAlgorithms(ctx context.Context) *apiconfig.ConfigEncryptAlgorithmResponse
 }
 
 // ConfigFileReleaseOperate 配置文件发布接口
 type ConfigFileReleaseOperate interface {
 	// PublishConfigFile 发布配置文件
-	PublishConfigFile(ctx context.Context, configFileRelease *api.ConfigFileRelease) *api.ConfigResponse
-
+	PublishConfigFile(ctx context.Context, configFileRelease *apiconfig.ConfigFileRelease) *apiconfig.ConfigResponse
 	// GetConfigFileRelease 获取配置文件发布
-	GetConfigFileRelease(ctx context.Context, namespace, group, fileName string) *api.ConfigResponse
-
-	// DeleteConfigFileRelease 删除配置文件发布内容
-	DeleteConfigFileRelease(ctx context.Context, namespace, group, fileName, deleteBy string) *api.ConfigResponse
+	GetConfigFileRelease(ctx context.Context, req *apiconfig.ConfigFileRelease) *apiconfig.ConfigResponse
+	// DeleteConfigFileReleases 批量删除配置文件发布内容
+	DeleteConfigFileReleases(ctx context.Context, reqs []*apiconfig.ConfigFileRelease) *apiconfig.ConfigBatchWriteResponse
+	// RollbackConfigFileReleases 批量回滚配置到指定版本
+	RollbackConfigFileReleases(ctx context.Context, releases []*apiconfig.ConfigFileRelease) *apiconfig.ConfigBatchWriteResponse
+	// GetConfigFileReleases 查询所有的配置发布版本信息
+	GetConfigFileReleases(ctx context.Context, filters map[string]string) *apiconfig.ConfigBatchQueryResponse
+	// GetConfigFileReleaseVersions 查询所有的配置发布版本信息
+	GetConfigFileReleaseVersions(ctx context.Context, filters map[string]string) *apiconfig.ConfigBatchQueryResponse
+	// GetConfigFileReleaseHistories 获取配置文件的发布历史
+	GetConfigFileReleaseHistories(ctx context.Context, filter map[string]string) *apiconfig.ConfigBatchQueryResponse
+	// UpsertAndReleaseConfigFile 创建/更新配置文件并发布
+	UpsertAndReleaseConfigFile(ctx context.Context, req *apiconfig.ConfigFilePublishInfo) *apiconfig.ConfigResponse
+	// StopGrayConfigFileReleases 停止所有的灰度发布配置
+	StopGrayConfigFileReleases(ctx context.Context, reqs []*apiconfig.ConfigFileRelease) *apiconfig.ConfigBatchWriteResponse
 }
 
-// ConfigFileReleaseHistoryOperate 配置文件发布历史接口
-type ConfigFileReleaseHistoryOperate interface {
-	// RecordConfigFileReleaseHistory 记录发布
-	RecordConfigFileReleaseHistory(ctx context.Context, fileRelease *model.ConfigFileRelease, releaseType, status string)
-
-	// GetConfigFileReleaseHistory 获取配置文件的发布历史
-	GetConfigFileReleaseHistory(ctx context.Context, namespace, group, fileName string, offset, limit uint32, endId uint64) *api.ConfigBatchQueryResponse
-
-	// GetConfigFileLatestReleaseHistory 获取最后一次发布记录
-	GetConfigFileLatestReleaseHistory(ctx context.Context, namespace, group, fileName string) *api.ConfigResponse
-}
-
-// ConfigFileClientAPI 给客户端提供服务接口，不同的上层协议抽象的公共服务逻辑
+// ConfigFileClientOperate 给客户端提供服务接口，不同的上层协议抽象的公共服务逻辑
 type ConfigFileClientOperate interface {
-	// GetConfigFileForClient 获取配置文件
-	GetConfigFileForClient(ctx context.Context, configFile *api.ClientConfigFileInfo) *api.ConfigClientResponse
+	// CreateConfigFileFromClient 调用config_file的方法创建配置文件
+	CreateConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFile) *apiconfig.ConfigClientResponse
+	// UpdateConfigFileFromClient 调用config_file的方法更新配置文件
+	UpdateConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFile) *apiconfig.ConfigClientResponse
+	// DeleteConfigFileFromClient 调用config_file的方法更新配置文件
+	DeleteConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFile) *apiconfig.ConfigResponse
+	// PublishConfigFileFromClient 调用config_file_release的方法发布配置文件
+	PublishConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFileRelease) *apiconfig.ConfigClientResponse
+	// UpsertAndReleaseConfigFile 创建/更新配置文件并发布
+	UpsertAndReleaseConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFilePublishInfo) *apiconfig.ConfigResponse
+	// CasUpsertAndReleaseConfigFileFromClient 创建/更新配置文件并发布
+	CasUpsertAndReleaseConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFilePublishInfo) *apiconfig.ConfigResponse
+	// LongPullWatchFile 客户端监听配置文件
+	LongPullWatchFile(ctx context.Context, req *apiconfig.ClientWatchConfigFileRequest) (WatchCallback, error)
+	// GetConfigFileNamesWithCache 获取某个配置分组下的配置文件
+	GetConfigFileNamesWithCache(ctx context.Context,
+		req *apiconfig.ConfigFileGroupRequest) *apiconfig.ConfigClientListResponse
+	// GetConfigFileWithCache 获取配置文件
+	GetConfigFileWithCache(ctx context.Context, req *apiconfig.ClientConfigFileInfo) *apiconfig.ConfigClientResponse
+	// GetConfigGroupsWithCache 获取某个命名空间下的配置分组列表
+	GetConfigGroupsWithCache(ctx context.Context, req *apiconfig.ClientConfigFileInfo) *apiconfig.ConfigDiscoverResponse
+}
 
-	// WatchConfigFiles 客户端监听配置文件
-	WatchConfigFiles(ctx context.Context,
-		request *api.ClientWatchConfigFileRequest) (func() *api.ConfigClientResponse, error)
+// ConfigFileTemplateOperate config file template operate
+type ConfigFileTemplateOperate interface {
+	// GetAllConfigFileTemplates get all config file templates
+	GetAllConfigFileTemplates(ctx context.Context) *apiconfig.ConfigBatchQueryResponse
+	// CreateConfigFileTemplate create config file template
+	CreateConfigFileTemplate(ctx context.Context, template *apiconfig.ConfigFileTemplate) *apiconfig.ConfigResponse
+	// GetConfigFileTemplate get config file template
+	GetConfigFileTemplate(ctx context.Context, name string) *apiconfig.ConfigResponse
 }
 
 // ConfigCenterServer 配置中心server
@@ -106,6 +133,19 @@ type ConfigCenterServer interface {
 	ConfigFileGroupOperate
 	ConfigFileOperate
 	ConfigFileReleaseOperate
-	ConfigFileReleaseHistoryOperate
 	ConfigFileClientOperate
+	ConfigFileTemplateOperate
+}
+
+// ResourceHook The listener is placed before and after the resource operation, only normal flow
+type ResourceHook interface {
+	// Before
+	Before(ctx context.Context, resourceType model.Resource)
+	// After
+	After(ctx context.Context, resourceType model.Resource, res *ResourceEvent) error
+}
+
+// ResourceEvent 资源事件
+type ResourceEvent struct {
+	ConfigGroup *apiconfig.ConfigFileGroup
 }

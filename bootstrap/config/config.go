@@ -20,20 +20,22 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 
-	yaml "gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v2"
 
-	"github.com/polarismesh/polaris-server/apiserver"
-	"github.com/polarismesh/polaris-server/auth"
-	"github.com/polarismesh/polaris-server/cache"
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/config"
-	"github.com/polarismesh/polaris-server/namespace"
-	"github.com/polarismesh/polaris-server/plugin"
-	"github.com/polarismesh/polaris-server/service"
-	"github.com/polarismesh/polaris-server/service/healthcheck"
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/admin"
+	"github.com/polarismesh/polaris/apiserver"
+	"github.com/polarismesh/polaris/auth"
+	"github.com/polarismesh/polaris/cache"
+	"github.com/polarismesh/polaris/common/log"
+	"github.com/polarismesh/polaris/config"
+	"github.com/polarismesh/polaris/namespace"
+	"github.com/polarismesh/polaris/plugin"
+	"github.com/polarismesh/polaris/service"
+	"github.com/polarismesh/polaris/service/healthcheck"
+	"github.com/polarismesh/polaris/store"
 )
 
 // Config 配置
@@ -45,6 +47,7 @@ type Config struct {
 	Naming       service.Config     `yaml:"naming"`
 	Config       config.Config      `yaml:"config"`
 	HealthChecks healthcheck.Config `yaml:"healthcheck"`
+	Maintain     admin.Config       `yaml:"maintain"`
 	Store        store.Config       `yaml:"store"`
 	Auth         auth.Config        `yaml:"auth"`
 	Plugin       plugin.Config      `yaml:"plugin"`
@@ -61,7 +64,10 @@ type Bootstrap struct {
 type PolarisService struct {
 	EnableRegister    bool       `yaml:"enable_register"`
 	ProbeAddress      string     `yaml:"probe_address"`
+	SelfAddress       string     `yaml:"self_address"`
+	NetworkInter      string     `yaml:"network_inter"`
 	Isolated          bool       `yaml:"isolated"`
+	DisableHeartbeat  bool       `yaml:"disable_heartbeat"`
 	HeartbeatInterval int        `yaml:"heartbeat_interval"`
 	Services          []*Service `yaml:"services"`
 }
@@ -106,14 +112,34 @@ func Load(filePath string) (*Config, error) {
 		fmt.Printf("[ERROR] %v\n", err)
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
+	buf, err := ioutil.ReadFile(filePath)
+	if nil != err {
+		return nil, fmt.Errorf("read file %s error", filePath)
+	}
 
-	config := &Config{}
-	err = yaml.NewDecoder(file).Decode(config)
-	if err != nil {
+	conf := &Config{
+		Bootstrap: defaultBootstrap(),
+		Maintain:  *admin.DefaultConfig(),
+	}
+	if err = parseYamlContent(string(buf), conf); err != nil {
 		fmt.Printf("[ERROR] %v\n", err)
 		return nil, err
 	}
 
-	return config, nil
+	return conf, nil
+}
+
+func parseYamlContent(content string, conf *Config) error {
+	if err := yaml.Unmarshal([]byte(replaceEnv(content)), conf); nil != err {
+		return fmt.Errorf("parse yaml %s error:%w", content, err)
+	}
+	return nil
+}
+
+// replaceEnv replace holder by env list
+func replaceEnv(configContent string) string {
+	return os.ExpandEnv(configContent)
 }

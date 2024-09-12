@@ -19,7 +19,6 @@ package boltdb
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,23 +26,25 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/ptypes/wrappers"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
 
-	v1 "github.com/polarismesh/polaris-server/common/api/v1"
-	"github.com/polarismesh/polaris-server/common/model"
+	"github.com/polarismesh/polaris/common/model"
 )
 
 func CreateTableDBHandlerAndRun(t *testing.T, tableName string, tf func(t *testing.T, handler BoltHandler)) {
-	tempDir, _ := ioutil.TempDir("", tableName)
+	tempDir := filepath.Join(os.TempDir(), tableName)
 	t.Logf("temp dir : %s", tempDir)
-	_ = os.Remove(filepath.Join(tempDir, fmt.Sprintf("%s.bolt", tableName)))
-	handler, err := NewBoltHandler(&BoltConfig{FileName: filepath.Join(tempDir, fmt.Sprintf("%s.bolt", tableName))})
+	_ = os.MkdirAll(tempDir, os.ModePerm)
+	boltFile := filepath.Join(tempDir, fmt.Sprintf("%s.bolt", tableName))
+	_ = os.Remove(boltFile)
+	handler, err := NewBoltHandler(&BoltConfig{FileName: boltFile})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
 		_ = handler.Close()
-		_ = os.Remove(filepath.Join(tempDir, fmt.Sprintf("%s.bolt", tableName)))
+		_ = os.Remove(boltFile)
 	}()
 	tf(t, handler)
 }
@@ -84,12 +85,12 @@ func TestBoltHandler_LoadNamespace(t *testing.T) {
 		CreateTime: time.Now(),
 		ModifyTime: time.Now(),
 	}
-	nsValues, err := handler.LoadValues(tblNameNamespace, []string{nsValue.Name}, &model.Namespace{})
+	nsValues, err := handler.LoadValues(tblNameNamespace, []string{nsValue.Name}, &Namespace{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	targetNsValue := nsValues[nsValue.Name]
-	targetNs := targetNsValue.(*model.Namespace)
+	targetNs := targetNsValue.(*Namespace)
 	fmt.Printf("loaded ns is %+v\n", targetNs)
 	if nsValue.Name != targetNs.Name {
 		fmt.Printf("name not equals\n")
@@ -105,7 +106,7 @@ func TestBoltHandler_DeleteNamespace(t *testing.T) {
 	nsValue := &model.Namespace{
 		Name: "Test",
 	}
-	err = handler.DeleteValues(tblNameNamespace, []string{nsValue.Name}, false)
+	err = handler.DeleteValues(tblNameNamespace, []string{nsValue.Name})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,25 +134,25 @@ func TestBoltHandler_Service(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nsValues, err := handler.LoadValues("service", []string{svcValue.ID}, &model.Service{})
+	nsValues, err := handler.LoadValues("service", []string{svcValue.ID}, &Service{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	targetSvcValue := nsValues[svcValue.ID]
-	targetSvc := targetSvcValue.(*model.Service)
+	targetSvc := targetSvcValue.(*Service)
 	fmt.Printf("loaded svc is %+v\n", targetSvc)
 	if svcValue.Name != targetSvc.Name || len(svcValue.Meta) != len(targetSvc.Meta) {
 		fmt.Printf("name not equals\n")
 	}
 	fmt.Printf("trget meta is %v\n", targetSvc.Meta)
 
-	_, _ = handler.LoadValuesByFilter("service", []string{"Meta"}, &model.Service{}, func(m map[string]interface{}) bool {
+	_, _ = handler.LoadValuesByFilter("service", []string{"Meta"}, &Service{}, func(m map[string]interface{}) bool {
 		values := m["Meta"]
 		fmt.Printf("values are %v\n", values)
 		return true
 	})
 
-	err = handler.DeleteValues("service", []string{svcValue.ID}, false)
+	err = handler.DeleteValues("service", []string{svcValue.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +166,7 @@ func TestBoltHandler_Location(t *testing.T) {
 	defer handler.Close()
 	id := "12345"
 	locValue := &model.Location{
-		Proto: &v1.Location{
+		Proto: &apimodel.Location{
 			Region: &wrappers.StringValue{Value: "huabei"},
 			Zone:   &wrappers.StringValue{Value: "shenzhen"},
 			Campus: &wrappers.StringValue{Value: "longgang1"},
@@ -186,7 +187,7 @@ func TestBoltHandler_Location(t *testing.T) {
 	targetLocValue := locValues[id]
 	targetLoc := targetLocValue.(*model.Location)
 	fmt.Printf("loaded loc is %+v\n", targetLoc)
-	err = handler.DeleteValues("location", []string{id}, false)
+	err = handler.DeleteValues("location", []string{id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestBoltHandler_CountValues(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	services, err := handler.LoadValues(tblService, ids, &model.Service{})
+	services, err := handler.LoadValues(tblService, ids, &Service{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,10 +249,27 @@ func TestBoltHandler_CountValues(t *testing.T) {
 	if nCount != count {
 		t.Fatalf("count not match, expect cnt=%d, actual cnt=%d", count, nCount)
 	}
-	err = handler.DeleteValues("service", ids, false)
+
+	properties := make(map[string]interface{})
+	properties[svcFieldValid] = false
+	err = handler.UpdateValue(tblService, "idSvcCount1", properties)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	nCount, err = handler.CountValues(tblService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nCount != count-1 {
+		t.Fatalf("count not match, expect cnt=%d, actual cnt=%d", count-1, nCount)
+	}
+
+	err = handler.DeleteValues("service", ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func TestBoltHandler_LoadValuesByFilter(t *testing.T) {
@@ -289,7 +307,7 @@ func TestBoltHandler_LoadValuesByFilter(t *testing.T) {
 		}
 	}
 	values, err := handler.LoadValuesByFilter(tblService, []string{"Owner"},
-		&model.Service{}, func(props map[string]interface{}) bool {
+		&Service{}, func(props map[string]interface{}) bool {
 			owner := props["Owner"].(string)
 			return owner == "user1" || owner == "user2"
 		})
@@ -299,7 +317,7 @@ func TestBoltHandler_LoadValuesByFilter(t *testing.T) {
 	if len(values) != 2 {
 		t.Fatal("filter count not match 2")
 	}
-	err = handler.DeleteValues("service", ids, false)
+	err = handler.DeleteValues("service", ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +367,7 @@ func TestBoltHandler_IterateFields(t *testing.T) {
 	if len(names) != count {
 		t.Fatalf("iterate count not match %d", count)
 	}
-	err = handler.DeleteValues("service", ids, false)
+	err = handler.DeleteValues("service", ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +416,7 @@ func TestBoltHandler_UpdateValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	values, err := handler.LoadValues(tblService, []string{targetId}, &model.Service{})
+	values, err := handler.LoadValues(tblService, []string{targetId}, &Service{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +425,7 @@ func TestBoltHandler_UpdateValue(t *testing.T) {
 		t.Fatalf("not exists %s", targetId)
 	}
 
-	if value.(*model.Service).Comment != afterComment {
+	if value.(*Service).Comment != afterComment {
 		t.Fatalf("after comment not match")
 	}
 

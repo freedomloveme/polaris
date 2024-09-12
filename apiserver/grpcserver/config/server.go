@@ -20,16 +20,20 @@ package config
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"github.com/polarismesh/polaris-server/apiserver/grpcserver"
-	"github.com/polarismesh/polaris-server/common/log"
-	"github.com/polarismesh/polaris-server/config"
-
+	apiconfig "github.com/polarismesh/specification/source/go/api/v1/config_manage"
 	"google.golang.org/grpc"
 
-	"github.com/polarismesh/polaris-server/apiserver"
-	api "github.com/polarismesh/polaris-server/common/api/v1"
+	"github.com/polarismesh/polaris/apiserver"
+	"github.com/polarismesh/polaris/apiserver/grpcserver"
+	"github.com/polarismesh/polaris/apiserver/grpcserver/utils"
+	commonlog "github.com/polarismesh/polaris/common/log"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
+	"github.com/polarismesh/polaris/config"
+)
+
+var (
+	configLog = commonlog.GetScopeOrDefaultByName(commonlog.ConfigLoggerName)
 )
 
 // ConfigGRPCServer 配置中心 GRPC API 服务器
@@ -51,9 +55,13 @@ func (g *ConfigGRPCServer) GetProtocol() string {
 
 // Initialize 初始化GRPC API服务器
 func (g *ConfigGRPCServer) Initialize(ctx context.Context, option map[string]interface{},
-	api map[string]apiserver.APIConfig) error {
-	g.openAPI = api
-	return g.BaseGrpcServer.Initialize(ctx, option, grpcserver.WithProtocol(g.GetProtocol()))
+	apiConf map[string]apiserver.APIConfig) error {
+	g.openAPI = apiConf
+	return g.BaseGrpcServer.Initialize(ctx, option,
+		grpcserver.WithModule(authcommon.ConfigModule),
+		grpcserver.WithProtocol(g.GetProtocol()),
+		grpcserver.WithLogger(commonlog.FindScope(commonlog.APIServerLoggerName)),
+	)
 }
 
 // Run 启动GRPC API服务器
@@ -63,8 +71,8 @@ func (g *ConfigGRPCServer) Run(errCh chan error) {
 			switch name {
 			case "client":
 				if apiConfig.Enable {
-					api.RegisterPolarisConfigGRPCServer(server, g)
-					openMethod, getErr := getConfigClientOpenMethod(g.GetProtocol())
+					apiconfig.RegisterPolarisConfigGRPCServer(server, g)
+					openMethod, getErr := utils.GetConfigClientOpenMethod(g.GetProtocol())
 					if getErr != nil {
 						return getErr
 					}
@@ -77,13 +85,13 @@ func (g *ConfigGRPCServer) Run(errCh chan error) {
 					}
 				}
 			default:
-				log.Errorf("[Config] api %s does not exist in grpcserver", name)
+				configLog.Errorf("[Config] api %s does not exist in grpcserver", name)
 				return fmt.Errorf("api %s does not exist in grpcserver", name)
 			}
 		}
 		var err error
 		if g.configServer, err = config.GetServer(); err != nil {
-			log.Errorf("[Config] %v", err)
+			configLog.Errorf("[Config] %v", err)
 			return err
 		}
 
@@ -97,10 +105,10 @@ func (g *ConfigGRPCServer) Stop() {
 }
 
 // Restart 重启Server
-func (g *ConfigGRPCServer) Restart(option map[string]interface{}, api map[string]apiserver.APIConfig,
+func (g *ConfigGRPCServer) Restart(option map[string]interface{}, apiConf map[string]apiserver.APIConfig,
 	errCh chan error) error {
 	initFunc := func() error {
-		return g.Initialize(context.Background(), option, api)
+		return g.Initialize(context.Background(), option, apiConf)
 	}
 	runFunc := func() {
 		g.Run(errCh)
@@ -116,17 +124,4 @@ func (g *ConfigGRPCServer) enterRateLimit(ip string, method string) uint32 {
 // allowAccess 限制访问
 func (g *ConfigGRPCServer) allowAccess(method string) bool {
 	return g.BaseGrpcServer.AllowAccess(method)
-}
-
-func getConfigClientOpenMethod(protocol string) (map[string]bool, error) {
-	openMethods := []string{"GetConfigFile", "WatchConfigFiles"}
-
-	openMethod := make(map[string]bool)
-
-	for _, item := range openMethods {
-		method := "/v1.PolarisConfig" + strings.ToUpper(protocol) + "/" + item
-		openMethod[method] = true
-	}
-
-	return openMethod, nil
 }

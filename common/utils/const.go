@@ -27,24 +27,52 @@ const (
 )
 
 var (
-	LocalHost string = "127.0.0.1"
+	// LocalHost local host
+	LocalHost = "127.0.0.1"
+	// LocalPort default listen port
+	LocalPort = 8091
+	// ConfDir default config dir
+	ConfDir = "conf/"
 )
 
 const (
+	// HeaderAuthTokenKey auth token key
 	HeaderAuthTokenKey string = "X-Polaris-Token"
-	HeaderIsOwnerKey   string = "X-Is-Owner"
-	HeaderUserIDKey    string = "X-User-ID"
-	HeaderOwnerIDKey   string = "X-Owner-ID"
-	HeaderUserRoleKey  string = "X-Polaris-User-Role"
+	// HeaderIsOwnerKey is owner key
+	HeaderIsOwnerKey string = "X-Is-Owner"
+	// HeaderUserIDKey user id key
+	HeaderUserIDKey string = "X-User-ID"
+	// HeaderOwnerIDKey owner id key
+	HeaderOwnerIDKey string = "X-Owner-ID"
+	// HeaderUserRoleKey user role key
+	HeaderUserRoleKey string = "X-Polaris-User-Role"
 
-	ContextAuthTokenKey   StringContext = StringContext(HeaderAuthTokenKey)
-	ContextIsOwnerKey     StringContext = StringContext(HeaderIsOwnerKey)
-	ContextUserIDKey      StringContext = StringContext(HeaderUserIDKey)
-	ContextOwnerIDKey     StringContext = StringContext(HeaderOwnerIDKey)
-	ContextUserRoleIDKey  StringContext = StringContext(HeaderUserRoleKey)
-	ContextAuthContextKey StringContext = StringContext("X-Polaris-AuthContext")
-	ContextUserNameKey    StringContext = StringContext("X-User-Name")
-	ContextClientAddress  StringContext = StringContext("client-address")
-
-	ContextOpenAsyncRegis StringContext = StringContext("client-asyncRegis")
+	// ContextAuthTokenKey auth token key
+	ContextAuthTokenKey = StringContext(HeaderAuthTokenKey)
+	// ContextIsOwnerKey is owner key
+	ContextIsOwnerKey = StringContext(HeaderIsOwnerKey)
+	// ContextUserIDKey user id key
+	ContextUserIDKey = StringContext(HeaderUserIDKey)
+	// ContextOwnerIDKey owner id key
+	ContextOwnerIDKey = StringContext(HeaderOwnerIDKey)
+	// ContextUserRoleIDKey user role key
+	ContextUserRoleIDKey = StringContext(HeaderUserRoleKey)
+	// ContextAuthContextKey auth context key
+	ContextAuthContextKey = StringContext("X-Polaris-AuthContext")
+	// ContextUserNameKey users name key
+	ContextUserNameKey = StringContext("X-User-Name")
+	// ContextClientAddress client address key
+	ContextClientAddress = StringContext("client-address")
+	// ContextOpenAsyncRegis open async register key
+	ContextOpenAsyncRegis = StringContext("client-asyncRegis")
+	// ContextGrpcHeader grpc header key
+	ContextGrpcHeader = StringContext("grpc-header")
+	// ContextIsFromClient is from client
+	ContextIsFromClient = StringContext("from-client")
+	// ContextIsFromSystem is from polaris system
+	ContextIsFromSystem = StringContext("from-system")
+	// ContextOperator operator info
+	ContextOperator = StringContext("operator")
+	// ContextRequestHeaders request headers
+	ContextRequestHeaders = StringContext("request-headers")
 )

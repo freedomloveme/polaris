@@ -22,7 +22,7 @@ import (
 	"fmt"
 )
 
-// GetStore 获取Store
+// TestGetStore 获取Store
 func TestGetStore() (Store, error) {
 	name := config.Name
 	if name == "" {
@@ -34,10 +34,16 @@ func TestGetStore() (Store, error) {
 		return nil, fmt.Errorf("store `%s` not found", name)
 	}
 	_ = s.Destroy()
+	fmt.Printf("[Store][Info] current use store plugin : %s\n", s.Name())
 
 	if err := s.Initialize(config); err != nil {
 		fmt.Printf("[ERROR] initialize store `%s` fail: %v", s.Name(), err)
 		panic(err)
 	}
 	return s, nil
+}
+
+// TestInjectConfig just for test
+func TestInjectConfig(conf Config) {
+	config = &conf
 }

@@ -33,6 +33,8 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zapgrpc"
 	"google.golang.org/grpc/grpclog"
+
+	"github.com/polarismesh/polaris/common/timewheel"
 )
 
 // none is used to disable logging output as well as to disable stack tracing.
@@ -61,7 +63,7 @@ func init() {
 }
 
 // prepZap is a utility function used by the Configure function.
-func prepZap(options *Options) ([]zapcore.Core, zapcore.Core, zapcore.WriteSyncer, error) {
+func prepZap(options *Options) ([]zapcore.Core, zapcore.Core, zapcore.WriteSyncer, *lumberjack.Logger, error) {
 	encCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
@@ -76,6 +78,13 @@ func prepZap(options *Options) ([]zapcore.Core, zapcore.Core, zapcore.WriteSynce
 		EncodeTime:     formatDate,
 	}
 
+	if options.OnlyContent {
+		encCfg.EncodeLevel = func(l zapcore.Level, pae zapcore.PrimitiveArrayEncoder) {}
+		encCfg.EncodeCaller = func(ec zapcore.EntryCaller, pae zapcore.PrimitiveArrayEncoder) {}
+		encCfg.EncodeName = func(s string, pae zapcore.PrimitiveArrayEncoder) {}
+		encCfg.EncodeTime = func(t time.Time, pae zapcore.PrimitiveArrayEncoder) {}
+	}
+
 	var enc zapcore.Encoder
 	if options.JSONEncoding {
 		enc = zapcore.NewJSONEncoder(encCfg)
@@ -84,34 +93,37 @@ func prepZap(options *Options) ([]zapcore.Core, zapcore.Core, zapcore.WriteSynce
 	}
 
 	var rotateSink zapcore.WriteSyncer
+	var l *lumberjack.Logger
 	if len(options.RotateOutputPath) > 0 {
-		rotateSink = zapcore.AddSync(&lumberjack.Logger{
+		l = &lumberjack.Logger{
 			Filename:   options.RotateOutputPath,
 			MaxSize:    options.RotationMaxSize,
 			MaxBackups: options.RotationMaxBackups,
 			MaxAge:     options.RotationMaxAge,
-		})
+			Compress:   options.Compress,
+		}
+		rotateSink = zapcore.AddSync(l)
 	}
 
 	err := createPathIfNotExist(options.ErrorOutputPaths...)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	errSink, closeErrorSink, err := zap.Open(options.ErrorOutputPaths...)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	var outputSink zapcore.WriteSyncer
 	if len(options.OutputPaths) > 0 {
 		err := createPathIfNotExist(options.OutputPaths...)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		outputSink, _, err = zap.Open(options.OutputPaths...)
 		if err != nil {
 			closeErrorSink()
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 
@@ -156,7 +168,7 @@ func prepZap(options *Options) ([]zapcore.Core, zapcore.Core, zapcore.WriteSynce
 	if errCore != nil {
 		cores = append(cores, errCore)
 	}
-	return cores, zapcore.NewCore(enc, sink, enabler), errSink, nil
+	return cores, zapcore.NewCore(enc, sink, enabler), errSink, l, nil
 }
 
 func formatDate(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
@@ -201,7 +213,8 @@ func formatDate(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 func updateScopes(typeName string, options *Options, cores []zapcore.Core, errSink zapcore.WriteSyncer) error {
 	scope := FindScope(typeName)
 	if scope == nil {
-		return fmt.Errorf("unknown logger name '%s' specified", typeName)
+		// 对还没注册的日志配置进行注册
+		scope = RegisterScope(typeName, fmt.Sprintf("%s logging messages.", typeName), 0)
 	}
 
 	// update the output levels of all listed scopes
@@ -209,17 +222,21 @@ func updateScopes(typeName string, options *Options, cores []zapcore.Core, errSi
 	if !ok {
 		return fmt.Errorf("unknown outPutLevel '%s' specified", options.OutputLevel)
 	}
-	scope.SetOutputLevel(outPutLevel)
 
 	// update the stack tracing levels of all listed scopes
 	stackTraceLevel, ok := stringToLevel[options.StackTraceLevel]
 	if !ok {
 		return fmt.Errorf("unknown stackTraceLevel '%s' specified", options.StackTraceLevel)
 	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	scope.SetOutputLevel(outPutLevel)
 	scope.SetStackTraceLevel(stackTraceLevel)
 
 	// update patchTable
-	pt := patchTable{
+	pt := &patchTable{
 		write: func(ent zapcore.Entry, fields []zapcore.Field) error {
 			var errs error
 			for _, core := range cores {
@@ -247,58 +264,102 @@ func updateScopes(typeName string, options *Options, cores []zapcore.Core, errSi
 		exitProcess: os.Exit,
 		errorSink:   errSink,
 	}
-	scope.pt.Store(&pt)
 
+	scope.pt = pt
 	// update the caller location setting of all listed scopes
-	scope.SetLogCallers(options.LogCaller)
+	scope.SetDisableLogCaller(options.DisableLogCaller)
 
 	return nil
 }
 
+func logRotationSyncCallback(tw *timewheel.TimeWheel, rotationMaxDurationForHour int64, log *lumberjack.Logger) {
+	tw.AddTask(uint32(rotationMaxDurationForHour*time.Hour.Milliseconds()), nil, func(i interface{}) {
+		if err := log.Rotate(); err != nil {
+			return
+		}
+		logRotationSyncCallback(tw, rotationMaxDurationForHour, log)
+	})
+}
+
 // Configure .
-// nolint: staticcheck
 // You typically call this once at process startup.
 // Configure Once this call returns, the logging system is ready to accept data.
 func Configure(optionsMap map[string]*Options) error {
+	tw := timewheel.New(time.Minute, 5, "log rotation sync")
+	tw.Start()
 	for typeName, options := range optionsMap {
 		setDefaultOption(options)
-		cores, captureCore, errSink, err := prepZap(options)
+		cores, captureCore, errSink, log, err := prepZap(options)
 		if err != nil {
 			return err
 		}
-
+		if options.RotationMaxDurationForHour != 0 {
+			logRotationSyncCallback(tw, int64(options.RotationMaxDurationForHour), log)
+		}
 		if err = updateScopes(typeName, options, cores, errSink); err != nil {
 			return err
 		}
 
-		if typeName == DefaultLoggerName {
-			opts := []zap.Option{
-				zap.ErrorOutput(errSink),
+		targetScope := scopes[typeName]
+
+		opts := []zap.Option{
+			zap.ErrorOutput(errSink),
+		}
+
+		if !targetScope.GetDisableLogCaller() {
+			opts = append(opts,
 				zap.AddCallerSkip(1),
-			}
+				zap.AddCaller(),
+			)
+		}
 
-			if defaultScope.GetLogCallers() {
-				opts = append(opts, zap.AddCaller())
-			}
+		l := targetScope.GetStackTraceLevel()
+		if l != NoneLevel {
+			opts = append(opts, zap.AddStacktrace(levelToZap[l]))
+		}
 
-			l := defaultScope.GetStackTraceLevel()
-			if l != NoneLevel {
-				opts = append(opts, zap.AddStacktrace(levelToZap[l]))
-			}
+		captureLogger := zap.New(captureCore, opts...)
 
-			captureLogger := zap.New(captureCore, opts...)
-
+		if typeName == DefaultLoggerName {
 			// capture global zap logging and force it through our logger
 			_ = zap.ReplaceGlobals(captureLogger)
-
 			// capture standard golang "log" package output and force it through our logger
 			_ = zap.RedirectStdLog(captureLogger)
-
-			// capture gRPC logging
-			if options.LogGrpc {
-				grpclog.SetLogger(zapgrpc.NewLogger(captureLogger.WithOptions(zap.AddCallerSkip(2))))
-			}
 		}
+
+		// capture gRPC logging
+		if options.LogGrpc {
+			grpclog.SetLogger(zapgrpc.NewLogger(captureLogger.WithOptions(zap.AddCallerSkip(2))))
+		}
+
+		// if typeName == DefaultLoggerName {
+		// 	opts := []zap.Option{
+		// 		zap.ErrorOutput(errSink),
+		// 		zap.AddCallerSkip(1),
+		// 	}
+
+		// 	if defaultScope.GetLogCallers() {
+		// 		opts = append(opts, zap.AddCaller())
+		// 	}
+
+		// 	l := defaultScope.GetStackTraceLevel()
+		// 	if l != NoneLevel {
+		// 		opts = append(opts, zap.AddStacktrace(levelToZap[l]))
+		// 	}
+
+		// 	captureLogger := zap.New(captureCore, opts...)
+
+		// 	// capture global zap logging and force it through our logger
+		// 	_ = zap.ReplaceGlobals(captureLogger)
+
+		// 	// capture standard golang "log" package output and force it through our logger
+		// 	_ = zap.RedirectStdLog(captureLogger)
+
+		// 	// capture gRPC logging
+		// 	if options.LogGrpc {
+		// 		grpclog.SetLogger(zapgrpc.NewLogger(captureLogger.WithOptions(zap.AddCallerSkip(2))))
+		// 	}
+		// }
 	}
 	return nil
 }
@@ -320,8 +381,6 @@ func setDefaultOption(options *Options) {
 	if options.StackTraceLevel == "" {
 		options.StackTraceLevel = levelToString[defaultStackTraceLevel]
 	}
-	// 默认打开
-	options.LogCaller = true
 }
 
 // Sync flushes any buffered log entries.

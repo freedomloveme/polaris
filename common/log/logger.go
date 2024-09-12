@@ -46,6 +46,7 @@ func Logger(file string) *zap.Logger {
 		MaxSize:    100, // MB
 		MaxBackups: 10,
 		MaxAge:     7, // days
+		Compress:   true,
 	})
 
 	return zap.New(zapcore.NewCore(zapcore.NewConsoleEncoder(encCfg), w, zap.InfoLevel))
@@ -62,6 +63,9 @@ func SetLogOutputLevel(scopeName string, levelName string) error {
 		return errors.New("invalid log level")
 	}
 
+	lock.Lock()
 	scope.SetOutputLevel(l)
+	lock.Unlock()
+
 	return nil
 }

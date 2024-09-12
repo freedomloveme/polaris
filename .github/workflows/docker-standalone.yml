@@ -1,32 +1,56 @@
-name: DockerImage
+# Tencent is pleased to support the open source community by making Polaris available.
+#
+# Copyright (C) 2019 THL A29 Limited, a Tencent company. All rights reserved.
+#
+# Licensed under the BSD 3-Clause License (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://opensource.org/licenses/BSD-3-Clause
+#
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+
+name: Standalone(Docker)
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      server_version:
+        description: "tag version for polaris"
+        required: true
+      console_version:
+        description: "tag version for polaris-console"
+        required: true
+      limiter_version:
+        description: "tag version for polaris-limiter"
+        required: true
 
 jobs:
   release:
-    name: Release Polaris Docker Image
+    name: Release polaris standalone docker-image
     runs-on: ubuntu-latest
     strategy:
       matrix:
         goos: [linux]
         goarch: [amd64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-
-      - name: Get version
-        id: get_version
-        run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
-
-      - name: Set up Go
-        uses: actions/setup-go@v2
         with:
-          go-version: 1.17.1
+          ref: ${{ github.event.inputs.server_version }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v1
+        with:
+          config-inline: |
+            insecure-entitlements = [ "network.host" ]
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v1
@@ -34,31 +58,17 @@ jobs:
           username: ${{ secrets.POLARIS_DOCKER_NAME }}
           password: ${{ secrets.POLARIS_DOCKER_PASSWORD }}
 
-      - name: Build Server
-        id: build-server
+      - name: Build
+        id: build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          DOCKER_TAG: ${{ steps.get_version.outputs.VERSION }}
+          SERVER_VERSION: ${{ github.event.inputs.server_version }}
+          CONSOLE_VERSION: ${{ github.event.inputs.console_version }}
+          LIMITER_VERSION: ${{ github.event.inputs.limiter_version }}
         run: |
-          echo "docker repository : polarismesh/polaris-server-standalone, tag : ${docker_tag}"
-          bash build.sh ${DOCKER_TAG}
-          
-          if [ $? != 0 ]; then
-              echo "build polaris-server failed"
-              exit 1
-          fi
-          cd deploy/standalone/docker
-          ls -lstrh
-          bash build.sh ${DOCKER_TAG}
-
-      - name: Build Prometheus
-        id: build-prom
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          DOCKER_TAG: ${{ steps.get_version.outputs.VERSION }}
-        run: |
-          cd deploy/docker/prometheus
-          ls -lstrh
-          bash build_docker_prom.sh ${DOCKER_TAG}
+          set -e
+          workdir=$(pwd)
+          cd ${workdir}
+          export WORKDIR=${workdir}
+          bash release/standalone/build_standalone_docker.sh

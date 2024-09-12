@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/polarismesh/polaris-server/store"
+	"github.com/polarismesh/polaris/store"
 )
 
 const adjustInterval = 60 * time.Second
@@ -35,27 +35,28 @@ type TimeAdjuster struct {
 
 func newTimeAdjuster(ctx context.Context, storage store.Store) *TimeAdjuster {
 	adjuster := &TimeAdjuster{storage: storage}
-	go adjuster.doTimeAdjust(ctx)
 	return adjuster
 }
 
 func (t *TimeAdjuster) doTimeAdjust(ctx context.Context) {
-	t.calcDiff()
-	ticker := time.NewTicker(adjustInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			log.Infof("[Health Check] time adjuster has been stopped")
-			return
-		case <-ticker.C:
-			t.calcDiff()
+	go func() {
+		t.calcDiff()
+		ticker := time.NewTicker(adjustInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Infof("[Health Check] time adjuster has been stopped")
+				return
+			case <-ticker.C:
+				t.calcDiff()
+			}
 		}
-	}
+	}()
 }
 
 func (t *TimeAdjuster) calcDiff() {
-	curTimeSecond, err := t.storage.GetUnixSecond()
+	curTimeSecond, err := t.storage.GetUnixSecond(time.Second)
 	if err != nil {
 		log.Errorf("[Health Check] fail to get now from store, err is %s", err.Error())
 		return
@@ -73,5 +74,8 @@ func (t *TimeAdjuster) calcDiff() {
 
 // GetDiff get diff time between store and current PC
 func (t *TimeAdjuster) GetDiff() int64 {
+	if nil == t {
+		return 0
+	}
 	return atomic.LoadInt64(&t.diff)
 }
